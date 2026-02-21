@@ -259,3 +259,8 @@ async def dashboard(request: Request, _=Depends(verify_credentials)):
 async def health():
     """Health-check endpoint для Docker и мониторинга."""
     return {"status": "ok"}
+
+
+# Регистрируем роуты дашборда: /api/dashboard/* и /api/pipeline/run
+# Импорт должен быть ПОСЛЕ определения app чтобы избежать circular import
+import web.dashboard  # noqa: F401, E402
