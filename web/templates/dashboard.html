@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — NewsBot{% endblock %}
+
+{% block content %}
+<!-- ── Stat cards ──────────────────────────────────────────────────────── -->
+<div class="stat-row" id="stat-row">
+    <div class="stat">
+        <div class="value" id="stat-total-runs">—</div>
+        <div class="label">Прогонов за 30 дней</div>
+    </div>
+    <div class="stat">
+        <div class="value" id="stat-published">—</div>
+        <div class="label">Публикаций за 30 дней</div>
+    </div>
+    <div class="stat">
+        <div class="value" id="stat-sources">—</div>
+        <div class="label">Активных источников</div>
+    </div>
+    <div class="stat">
+        <div class="value" id="stat-cost">—</div>
+        <div class="label">Расходы за месяц ($)</div>
+    </div>
+    <div style="display:flex;align-items:center;padding:0 8px;">
+        <button class="run-btn" id="run-btn" onclick="triggerRun()">▶ Запустить прогон</button>
+    </div>
+</div>
+
+<!-- ── Charts row 1 ───────────────────────────────────────────────────── -->
+<div class="grid">
+    <!-- Воронка агентов -->
+    <div class="card">
+        <h3>Воронка агентов (30 дней)</h3>
+        <canvas id="chartFunnel" height="220"></canvas>
+    </div>
+
+    <!-- Топ источников -->
+    <div class="card">
+        <h3>Топ источников</h3>
+        <canvas id="chartSources" height="220"></canvas>
+    </div>
+
+    <!-- Причины отклонений -->
+    <div class="card">
+        <h3>Причины отклонений</h3>
+        <canvas id="chartReject" height="220"></canvas>
+    </div>
+</div>
+
+<!-- ── Charts row 2 ───────────────────────────────────────────────────── -->
+<div class="grid">
+    <!-- Динамика публикаций -->
+    <div class="card card-full" style="grid-column:1/-1">
+        <h3>Публикации по дням (30 дней)</h3>
+        <canvas id="chartTimeline" height="120"></canvas>
+    </div>
+</div>
+
+<!-- ── Token costs ─────────────────────────────────────────────────────── -->
+<div class="grid">
+    <div class="card card-full">
+        <h3>Расход токенов по агентам (30 дней)</h3>
+        <canvas id="chartTokens" height="120"></canvas>
+    </div>
+</div>
+
+<!-- ── Recent posts ────────────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:20px">
+    <h3>Последние публикации</h3>
+    <table id="posts-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Заголовок / начало текста</th>
+                <th>Источник</th>
+                <th>Дата</th>
+                <th>Telegram</th>
+            </tr>
+        </thead>
+        <tbody id="posts-tbody">
+            <tr><td colspan="5" style="color:var(--muted);text-align:center">Загрузка...</td></tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+
+{% block scripts %}
+<script>
+// ── Palette ───────────────────────────────────────────────────────────────────
+const C = {
+    accent:  '#6366f1',
+    green:   '#22c55e',
+    yellow:  '#f59e0b',
+    red:     '#ef4444',
+    blue:    '#3b82f6',
+    purple:  '#a855f7',
+    muted:   '#94a3b8',
+    surface: '#1a1d27',
+    border:  '#2a2d3e',
+};
+
+Chart.defaults.color          = C.muted;
+Chart.defaults.borderColor    = C.border;
+Chart.defaults.font.family    = "'Segoe UI', system-ui, sans-serif";
+Chart.defaults.font.size      = 12;
+
+// ── Shared chart options helpers ──────────────────────────────────────────────
+function gridOpts(axis = 'y') {
+    return { grid: { color: C.border }, ticks: { color: C.muted } };
+}
+
+function tooltipStyle() {
+    return {
+        plugins: {
+            tooltip: {
+                backgroundColor: '#23263a',
+                borderColor: C.border,
+                borderWidth: 1,
+                titleColor: '#e2e8f0',
+                bodyColor: C.muted,
+            },
+            legend: { labels: { color: '#e2e8f0', boxWidth: 12 } },
+        },
+    };
+}
+
+// ── Chart instances (kept for potential future destroy/recreate) ──────────────
+let charts = {};
+
+// ── 1. Funnel chart (vertical bar) ───────────────────────────────────────────
+function renderFunnel(data) {
+    const labels = ['Найдено', 'Проверено', 'Написано', 'Отформ.', 'Опубл.'];
+    const values = [
+        data.found     ?? 0,
+        data.verified  ?? 0,
+        data.written   ?? 0,
+        data.formatted ?? 0,
+        data.published ?? 0,
+    ];
+    const colors = [C.blue, C.purple, C.yellow, C.accent, C.green];
+
+    if (charts.funnel) charts.funnel.destroy();
+    charts.funnel = new Chart(document.getElementById('chartFunnel'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                data: values,
+                backgroundColor: colors,
+                borderRadius: 6,
+                barThickness: 36,
+            }],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                ...tooltipStyle().plugins,
+                legend: { display: false },
+            },
+            scales: {
+                x: gridOpts('x'),
+                y: { ...gridOpts('y'), beginAtZero: true },
+            },
+        },
+    });
+}
+
+// ── 2. Top sources (horizontal bar) ──────────────────────────────────────────
+function renderSources(data) {
+    const sorted = [...data].sort((a, b) => b.count - a.count).slice(0, 8);
+    if (charts.sources) charts.sources.destroy();
+    charts.sources = new Chart(document.getElementById('chartSources'), {
+        type: 'bar',
+        data: {
+            labels: sorted.map(s => s.name),
+            datasets: [{
+                data:            sorted.map(s => s.count),
+                backgroundColor: C.accent,
+                borderRadius:    4,
+                barThickness:    18,
+            }],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: {
+                ...tooltipStyle().plugins,
+                legend: { display: false },
+            },
+            scales: {
+                x: { ...gridOpts('x'), beginAtZero: true },
+                y: gridOpts('y'),
+            },
+        },
+    });
+}
+
+// ── 3. Rejection reasons (doughnut) ──────────────────────────────────────────
+function renderReject(data) {
+    if (!data || !data.labels || data.labels.length === 0) {
+        document.getElementById('chartReject').parentElement.innerHTML =
+            '<h3>Причины отклонений</h3>' +
+            '<p style="color:var(--muted);text-align:center;margin-top:40px">Нет данных</p>';
+        return;
+    }
+    const palette = [C.red, C.yellow, C.blue, C.purple, C.accent, C.green];
+    if (charts.reject) charts.reject.destroy();
+    charts.reject = new Chart(document.getElementById('chartReject'), {
+        type: 'doughnut',
+        data: {
+            labels: data.labels,
+            datasets: [{
+                data:            data.counts,
+                backgroundColor: palette.slice(0, data.labels.length),
+                borderColor:     C.surface,
+                borderWidth:     2,
+            }],
+        },
+        options: {
+            responsive: true,
+            cutout: '60%',
+            plugins: {
+                ...tooltipStyle().plugins,
+                legend: { position: 'right', labels: { color: '#e2e8f0', boxWidth: 12 } },
+            },
+        },
+    });
+}
+
+// ── 4. Timeline (line chart) ──────────────────────────────────────────────────
+function renderTimeline(data) {
+    if (charts.timeline) charts.timeline.destroy();
+    charts.timeline = new Chart(document.getElementById('chartTimeline'), {
+        type: 'line',
+        data: {
+            labels: data.labels,
+            datasets: [{
+                label:           'Публикации',
+                data:            data.values,
+                borderColor:     C.green,
+                backgroundColor: 'rgba(34,197,94,0.12)',
+                borderWidth:     2,
+                tension:         0.4,
+                fill:            true,
+                pointRadius:     3,
+                pointBackgroundColor: C.green,
+            }],
+        },
+        options: {
+            responsive: true,
+            plugins: tooltipStyle().plugins,
+            scales: {
+                x: { ...gridOpts('x'), ticks: { maxTicksLimit: 15, color: C.muted } },
+                y: { ...gridOpts('y'), beginAtZero: true, ticks: { stepSize: 1 } },
+            },
+        },
+    });
+}
+
+// ── 5. Token usage (stacked bar) ─────────────────────────────────────────────
+function renderTokens(data) {
+    if (!data || !data.labels) return;
+    if (charts.tokens) charts.tokens.destroy();
+    charts.tokens = new Chart(document.getElementById('chartTokens'), {
+        type: 'bar',
+        data: {
+            labels: data.labels,
+            datasets: [
+                {
+                    label:           'Fact-checker',
+                    data:            data.fact_checker,
+                    backgroundColor: C.yellow,
+                    borderRadius:    4,
+                },
+                {
+                    label:           'Writer',
+                    data:            data.writer,
+                    backgroundColor: C.accent,
+                    borderRadius:    4,
+                },
+                {
+                    label:           'Formatter',
+                    data:            data.formatter,
+                    backgroundColor: C.blue,
+                    borderRadius:    4,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            plugins: tooltipStyle().plugins,
+            scales: {
+                x: { ...gridOpts('x'), stacked: true, ticks: { maxTicksLimit: 15 } },
+                y: { ...gridOpts('y'), stacked: true, beginAtZero: true },
+            },
+        },
+    });
+}
+
+// ── Recent posts table ────────────────────────────────────────────────────────
+function renderPosts(posts) {
+    const tbody = document.getElementById('posts-tbody');
+    if (!posts || posts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center">Публикаций пока нет</td></tr>';
+        return;
+    }
+    tbody.innerHTML = posts.map((p, i) => {
+        const preview = p.post_text ? p.post_text.replace(/<[^>]*>/g, '').slice(0, 80) + '…' : '—';
+        const date    = p.published_at ? p.published_at.slice(0, 16).replace('T', ' ') : '—';
+        const tgLink  = p.telegram_msg_id
+            ? `<a href="https://t.me/${p.channel_id.replace('@','')}/${p.telegram_msg_id}"
+                  target="_blank" style="color:var(--accent)">#${p.telegram_msg_id}</a>`
+            : '—';
+        return `<tr>
+            <td style="color:var(--muted)">${i + 1}</td>
+            <td>${preview}</td>
+            <td><span style="color:var(--text)">${p.source_name ?? '—'}</span></td>
+            <td style="white-space:nowrap;color:var(--muted)">${date}</td>
+            <td>${tgLink}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ── Stat cards ────────────────────────────────────────────────────────────────
+function updateStats(funnel, costs, sourcesData) {
+    document.getElementById('stat-total-runs').textContent =
+        funnel.total_runs ?? '—';
+    document.getElementById('stat-published').textContent =
+        funnel.published  ?? '—';
+    document.getElementById('stat-sources').textContent =
+        sourcesData.length ?? '—';
+    const totalCost = (costs?.total_usd ?? 0).toFixed(4);
+    document.getElementById('stat-cost').textContent = '$' + totalCost;
+}
+
+// ── Load all data in parallel ─────────────────────────────────────────────────
+async function loadDashboard() {
+    try {
+        const [funnel, sources, timeline, costs, posts] = await Promise.all([
+            fetch('/api/dashboard/funnel').then(r => r.json()),
+            fetch('/api/dashboard/sources').then(r => r.json()),
+            fetch('/api/dashboard/timeline').then(r => r.json()),
+            fetch('/api/dashboard/costs').then(r => r.json()),
+            fetch('/api/dashboard/recent_posts').then(r => r.json()),
+        ]);
+
+        updateStats(funnel, costs, sources);
+        renderFunnel(funnel);
+        renderSources(sources);
+        renderReject(funnel.rejection_reasons ?? { labels: [], counts: [] });
+        renderTimeline(timeline);
+        renderTokens(costs?.token_usage);
+        renderPosts(posts);
+    } catch (err) {
+        console.error('Dashboard load error:', err);
+        showToast('Ошибка загрузки данных: ' + err.message, 5000);
+    }
+}
+
+// ── Manual pipeline trigger ───────────────────────────────────────────────────
+async function triggerRun() {
+    const btn = document.getElementById('run-btn');
+    btn.disabled  = true;
+    btn.textContent = '⏳ Запускаем...';
+    try {
+        const resp = await fetch('/api/pipeline/run', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`✓ Прогон #${data.run_id} запущен`);
+        } else {
+            showToast('Ошибка: ' + (data.detail ?? 'неизвестная'), 5000);
+        }
+    } catch (err) {
+        showToast('Сетевая ошибка: ' + err.message, 5000);
+    } finally {
+        btn.disabled    = false;
+        btn.textContent = '▶ Запустить прогон';
+    }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadDashboard();
+// Авто-обновление каждые 5 минут
+setInterval(loadDashboard, 5 * 60 * 1000);
+</script>
+{% endblock %}

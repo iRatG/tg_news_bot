@@ -1,0 +1,10 @@
+# Force LF line endings for all text files (cross-platform: Windows dev → Ubuntu VPS)
+* text=auto eol=lf
+
+# Explicitly binary files — no conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.db binary

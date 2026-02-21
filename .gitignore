@@ -1,0 +1,38 @@
+# Secrets — NEVER commit
+.env
+keys.txt
+human_review_task_business.md
+technical_review.md
+
+# Database
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Windows special device names (not real files)
+nul
+con
+prn
+aux
