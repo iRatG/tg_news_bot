@@ -7,10 +7,10 @@ from __future__ import annotations
 генерирует иллюстрацию через Leonardo AI.
 
 Алгоритм:
-    1. Передаёт текст в gpt-4o-mini с инструкцией добавить HTML-теги Telegram.
+    1. Передаёт текст в claude-haiku-4-5 с инструкцией добавить HTML-теги Telegram.
     2. Проверяет баланс тегов <b> и корректность <a href="...">.
     3. Если image_enabled=true и LEONARDO_API_KEY задан — генерирует картинку:
-       a) gpt-4o-mini создаёт image-prompt (до 100 слов)
+       a) claude-haiku-4-5 создаёт image-prompt (до 100 слов)
        b) Leonardo AI API: POST generations → poll → download bytes в память
        c) При любой ошибке Leonardo — пропускаем картинку, не блокируем пайплайн
     4. Проверяет что итоговый текст <= 1024 символа (лимит Telegram caption).
@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-import openai
+import anthropic
 import requests
 from tenacity import (
     retry,
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-FORMATTER_MODEL     = "gpt-4o-mini"
+FORMATTER_MODEL     = "claude-haiku-4-5-20251001"
 TELEGRAM_MAX_CHARS  = 1024   # Жёсткий лимит caption/message Telegram
 LEONARDO_POLL_SEC   = 3      # Интервал опроса статуса генерации
 LEONARDO_TIMEOUT_SEC = 30    # Максимальное ожидание Leonardo
@@ -72,7 +72,7 @@ def _retryable(func):
     """3 попытки при RateLimitError / APIStatusError."""
     return retry(
         retry=retry_if_exception_type(
-            (openai.RateLimitError, openai.APIStatusError)
+            (anthropic.RateLimitError, anthropic.APIStatusError)
         ),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=30),
@@ -105,24 +105,22 @@ def _format_prompt(post_text: str) -> str:
 @_retryable
 async def _format_html(post_text: str) -> tuple[str, int, int]:
     """
-    Применяет Telegram HTML-разметку через gpt-4o-mini.
+    Применяет Telegram HTML-разметку через claude-haiku-4-5.
 
     Returns:
         (formatted_text, input_tokens, output_tokens)
     """
-    client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    response = await client.chat.completions.create(
+    client   = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    response = await client.messages.create(
         model=FORMATTER_MODEL,
-        messages=[
-            {"role": "system", "content": _FORMAT_SYSTEM},
-            {"role": "user",   "content": _format_prompt(post_text)},
-        ],
-        temperature=0.1,
         max_tokens=800,
+        system=_FORMAT_SYSTEM,
+        messages=[{"role": "user", "content": _format_prompt(post_text)}],
+        temperature=0.1,
     )
-    text    = response.choices[0].message.content.strip()
-    in_tok  = getattr(response.usage, "prompt_tokens",     0)
-    out_tok = getattr(response.usage, "completion_tokens", 0)
+    text    = response.content[0].text.strip()
+    in_tok  = response.usage.input_tokens
+    out_tok = response.usage.output_tokens
     return text, in_tok, out_tok
 
 
@@ -159,10 +157,11 @@ def _validate_html(text: str) -> str:
 
 @_retryable
 async def _generate_image_prompt(post_text: str) -> str:
-    """Генерирует краткий image-prompt для Leonardo AI через gpt-4o-mini."""
-    client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    response = await client.chat.completions.create(
+    """Генерирует краткий image-prompt для Leonardo AI через claude-haiku-4-5."""
+    client   = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    response = await client.messages.create(
         model=FORMATTER_MODEL,
+        max_tokens=150,
         messages=[{
             "role": "user",
             "content": (
@@ -172,9 +171,8 @@ async def _generate_image_prompt(post_text: str) -> str:
             ),
         }],
         temperature=0.8,
-        max_tokens=150,
     )
-    return response.choices[0].message.content.strip()
+    return response.content[0].text.strip()
 
 
 def _call_leonardo(image_prompt: str) -> Optional[bytes]:

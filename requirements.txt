@@ -5,8 +5,9 @@ feedparser==6.0.11
 httpx==0.27.0
 requests==2.31.0
 
-# AI APIs (OpenAI SDK used for OpenAI + Perplexity)
-openai==1.51.0
+# AI APIs
+openai==1.51.0       # Perplexity fact-checker + dedup embeddings
+anthropic==0.40.0    # Writer + Formatter (OpenAI blocked by geo on VPS)
 
 # Telegram
 python-telegram-bot==21.5
