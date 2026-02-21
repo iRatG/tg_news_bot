@@ -31,6 +31,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Deploy script содержит учётные данные — не коммитить
+scripts/deploy_vps.py
+
 # Windows special device names (not real files)
 nul
 con

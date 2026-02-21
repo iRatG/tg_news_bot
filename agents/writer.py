@@ -10,18 +10,21 @@ from __future__ import annotations
 Алгоритм:
     1. Загружает системный промпт из БД (с fallback на захардкоженный default).
     2. Формирует user-запрос из заголовка, содержимого и источников верификации.
-    3. Вызывает claude-haiku-4-5 и получает черновик поста 400-600 символов.
+    3. Вызывает Perplexity sonar-pro через OpenAI-совместимый API.
     4. Проверяет длину и наличие URL — предупреждает, но не блокирует.
     5. Возвращает WriterResult для передачи в Formatter.
 
-Стоимость: ~$0.001/день (claude-haiku-4-5, ~800 токенов/пост).
+Примечание: OpenAI и Anthropic заблокированы по гео на VPS (RU).
+Perplexity API доступен глобально.
+
+Стоимость: ~$0.003/день (sonar-pro, ~800 токенов/пост).
 """
 
 import logging
 import time
 from dataclasses import dataclass
 
-import anthropic
+import openai
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -37,11 +40,12 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-WRITER_MODEL       = "claude-haiku-4-5-20251001"
-MAX_TOKENS         = 600
-TEMPERATURE        = 0.7    # Достаточно для стиля, не слишком случайный
-MIN_POST_CHARS     = 300
-MAX_POST_CHARS     = 700    # Мягкий потолок, жёсткий (1024) — в Formatter
+# Perplexity sonar-pro — хорошее качество текста, не требует VPN
+WRITER_MODEL   = "sonar-pro"
+MAX_TOKENS     = 600
+TEMPERATURE    = 0.7
+MIN_POST_CHARS = 300
+MAX_POST_CHARS = 700    # Мягкий потолок, жёсткий (1024) — в Formatter
 
 # Fallback-промпт если settings недоступен
 _DEFAULT_SYSTEM_PROMPT = """Ты — senior data engineer и AI practitioner с 10 годами опыта.
@@ -83,10 +87,10 @@ class WriterResult:
 # ── Retry-декоратор ───────────────────────────────────────────────────────────
 
 def _retryable(func):
-    """3 попытки при RateLimitError / APIStatusError, иначе — немедленный выброс."""
+    """3 попытки при RateLimitError / APIStatusError."""
     return retry(
         retry=retry_if_exception_type(
-            (anthropic.RateLimitError, anthropic.APIStatusError)
+            (openai.RateLimitError, openai.APIStatusError)
         ),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=30),
@@ -100,12 +104,7 @@ def _build_user_prompt(
     article: RawArticleCandidate,
     verification: VerificationResult,
 ) -> str:
-    """
-    Формирует user-промпт с контекстом статьи и ссылками-подтверждениями.
-
-    Передаём только первые 1000 символов content — достаточно для контекста
-    и экономит токены.
-    """
+    """Формирует user-промпт с контекстом статьи."""
     verified_by = ", ".join(verification.sources[:2]) if verification.sources else "—"
     return (
         f"Напиши пост об этой статье:\n\n"
@@ -120,26 +119,29 @@ def _build_user_prompt(
 # ── Основная логика ───────────────────────────────────────────────────────────
 
 @_retryable
-async def _call_claude(system_prompt: str, user_prompt: str) -> tuple[str, int, int]:
+async def _call_perplexity(system_prompt: str, user_prompt: str) -> tuple[str, int, int]:
     """
-    Вызывает claude-haiku-4-5 через Anthropic API и возвращает
-    (текст, input_tokens, output_tokens).
+    Вызывает Perplexity sonar-pro через OpenAI-совместимый API.
 
-    Raises:
-        anthropic.RateLimitError: при превышении лимита (tenacity повторит).
-        anthropic.APIError: при других ошибках API.
+    Returns:
+        (текст, input_tokens, output_tokens)
     """
-    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-    response = await client.messages.create(
-        model=WRITER_MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-        temperature=TEMPERATURE,
+    client = openai.AsyncOpenAI(
+        api_key=settings.PERPLEXITY_API_KEY,
+        base_url="https://api.perplexity.ai",
     )
-    text    = response.content[0].text.strip()
-    in_tok  = response.usage.input_tokens
-    out_tok = response.usage.output_tokens
+    response = await client.chat.completions.create(
+        model=WRITER_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS,
+    )
+    text    = response.choices[0].message.content.strip()
+    in_tok  = getattr(response.usage, "prompt_tokens",     0)
+    out_tok = getattr(response.usage, "completion_tokens", 0)
     return text, in_tok, out_tok
 
 
@@ -151,7 +153,6 @@ async def write_post(
     Создаёт Telegram-пост от лица senior data engineer.
 
     Загружает системный промпт из БД (обновляемый через admin-панель).
-    Предупреждает о нарушениях длины, но не блокирует — Formatter обрежет.
 
     Args:
         article:      Кандидат от Researcher.
@@ -163,29 +164,22 @@ async def write_post(
     t0 = time.monotonic()
     logger.info(f"[writer] Написание поста: {article.title[:70]!r}")
 
-    # Читаем промпт из БД — можно менять через admin без передеплоя
     system_prompt = await get_setting("writer_system_prompt", _DEFAULT_SYSTEM_PROMPT)
     user_prompt   = _build_user_prompt(article, verification)
 
     try:
-        post_text, in_tok, out_tok = await _call_claude(system_prompt, user_prompt)
+        post_text, in_tok, out_tok = await _call_perplexity(system_prompt, user_prompt)
     except Exception as exc:
-        logger.error(f"[writer] Ошибка Claude API: {exc}")
+        logger.error(f"[writer] Ошибка Perplexity API: {exc}")
         raise
 
     latency    = int((time.monotonic() - t0) * 1000)
     char_count = len(post_text)
 
     if char_count < MIN_POST_CHARS:
-        logger.warning(
-            f"[writer] Пост слишком короткий: {char_count} симв. "
-            f"(мин. {MIN_POST_CHARS})"
-        )
+        logger.warning(f"[writer] Пост слишком короткий: {char_count} симв.")
     elif char_count > MAX_POST_CHARS:
-        logger.warning(
-            f"[writer] Пост длинноват: {char_count} симв. "
-            f"(рек. макс. {MAX_POST_CHARS}) — Formatter обрежет"
-        )
+        logger.warning(f"[writer] Пост длинноват: {char_count} симв. — Formatter обрежет")
 
     if "http" not in post_text:
         logger.warning("[writer] В посте не найдена ссылка на источник")
