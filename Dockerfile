@@ -5,15 +5,6 @@ FROM python:3.11-slim
 LABEL maintainer="newsbot"
 LABEL description="Telegram AI NewsBot — 5-agent pipeline"
 
-# ── Системные зависимости ─────────────────────────────────────────────────────
-# ca-certificates — для SSL при работе с API
-# curl            — для HEALTHCHECK
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl && \
-    rm -rf /var/lib/apt/lists/*
-
 # ── Рабочая директория ────────────────────────────────────────────────────────
 WORKDIR /app
 
@@ -39,10 +30,9 @@ ENV PYTHONUNBUFFERED=1 \
 # ── Порт FastAPI ──────────────────────────────────────────────────────────────
 EXPOSE 8000
 
-# ── Healthcheck — HTTP-пинг каждые 30 секунд ─────────────────────────────────
-# /health возвращает 200 JSON если бот работает нормально
+# ── Healthcheck через Python (curl не нужен) ──────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 # ── Точка входа ───────────────────────────────────────────────────────────────
 CMD ["python", "main.py"]
