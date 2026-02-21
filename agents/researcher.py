@@ -1,3 +1,4 @@
+
 """
 Агент 1 — Researcher.
 
@@ -16,6 +17,7 @@
 
 import hashlib
 import logging
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -117,6 +119,8 @@ def _parse_feed(source: dict) -> List[dict]:
     поэтому завершаем работу только при полном отсутствии записей.
     """
     try:
+        # Таймаут 10с на сокет — feedparser не имеет встроенного таймаута
+        socket.setdefaulttimeout(10)
         feed = feedparser.parse(
             source["url"],
             request_headers={"User-Agent": "Mozilla/5.0 tg-news-bot/1.0"},
