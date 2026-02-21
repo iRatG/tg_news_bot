@@ -81,7 +81,7 @@ async def _generate_embedding(text_input: str) -> Optional[List[float]]:
         )
         return response.data[0].embedding
     except Exception as exc:
-        logger.error(f"[dedup] Ошибка генерации embedding: {exc}")
+        logger.warning(f"[dedup] Embedding недоступен (ожидаемо на RU VPS): {type(exc).__name__}")
         return None
 
 
