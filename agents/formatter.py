@@ -28,6 +28,7 @@ from __future__ import annotations
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -140,13 +141,34 @@ async def _format_html(post_text: str) -> tuple[str, int, int]:
     return text, in_tok, out_tok
 
 
+_UNSUPPORTED_TAGS = re.compile(
+    r'</?(?:p|div|span|h[1-6]|ul|ol|li|hr|br|table|tr|td|th|thead|tbody|'
+    r'section|article|header|footer|blockquote|figure|figcaption)(?:\s[^>]*)?>',
+    re.IGNORECASE,
+)
+
+
 def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     """
-    Проверяет и исправляет базовые HTML-проблемы.
+    Проверяет и исправляет HTML для Telegram Bot API.
 
+    Telegram поддерживает только: <b>, <i>, <u>, <s>, <a>, <code>, <pre>,
+    <strong>, <em>, <del>, <strike>, <tg-spoiler>.
+
+    - <br> → \\n (Telegram не поддерживает <br>)
+    - Удаляет прочие неподдерживаемые теги (p, div, span, h1-h6 и др.)
     - Незакрытый <b> → добавляет </b>
     - Текст длиннее max_chars → жёсткая обрезка до последнего пробела
     """
+    # <br> → перенос строки
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+
+    # Удаляем неподдерживаемые теги
+    cleaned = _UNSUPPORTED_TAGS.sub('', text)
+    if cleaned != text:
+        logger.warning("[formatter] Удалены неподдерживаемые HTML-теги")
+    text = cleaned
+
     # Баланс тега <b>
     if text.count("<b>") != text.count("</b>"):
         logger.warning("[formatter] Дисбаланс тегов <b> — исправляю")
