@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-FORMATTER_MODEL      = "sonar-pro"
+FORMATTER_MODEL      = "sonar"    # sonar идентично sonar-pro по качеству HTML, на 87% дешевле
 TELEGRAM_MAX_SINGLE  = 1024   # Лимит caption (с картинкой) и short message
 TELEGRAM_MAX_LONG    = 4096   # Лимит обычного сообщения (без картинки)
 LEONARDO_POLL_SEC    = 3      # Интервал опроса статуса генерации
@@ -118,7 +118,7 @@ def _format_prompt(post_text: str) -> str:
 @_retryable
 async def _format_html(post_text: str) -> tuple[str, int, int]:
     """
-    Применяет Telegram HTML-разметку через Perplexity sonar-pro.
+    Применяет Telegram HTML-разметку через Perplexity sonar.
 
     Returns:
         (formatted_text, input_tokens, output_tokens)
@@ -135,6 +135,10 @@ async def _format_html(post_text: str) -> tuple[str, int, int]:
         ],
         temperature=0.1,
         max_tokens=800,
+        extra_body={
+            # Formatter только добавляет HTML-теги, веб-поиск не нужен
+            "web_search_options": {"search_context_size": "low"},
+        },
     )
     text    = response.choices[0].message.content.strip()
     in_tok  = getattr(response.usage, "prompt_tokens",     0)
@@ -198,7 +202,7 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
 
 @_retryable
 async def _generate_image_prompt(post_text: str) -> str:
-    """Генерирует краткий image-prompt для Leonardo AI через Perplexity sonar-pro."""
+    """Генерирует краткий image-prompt для Leonardo AI через Perplexity sonar."""
     client = openai.AsyncOpenAI(
         api_key=settings.PERPLEXITY_API_KEY,
         base_url="https://api.perplexity.ai",

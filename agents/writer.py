@@ -29,9 +29,10 @@ from __future__ import annotations
     practitioner — что применимо прямо сейчас
     skeptic      — ограничения и что умолчали
 
-Примечание: Perplexity sonar-pro доступен глобально с RU VPS.
+Примечание: Perplexity sonar доступен глобально с RU VPS.
+A/B тест (2026-02-22): sonar не хуже sonar-pro, на 88% дешевле, URL 4/4 vs 2/4.
 DeepSeek НЕ работает внутри Docker-контейнера на VPS (Connection error, 2026-02-22).
-Стоимость: ~$0.003/день (sonar-pro, ~800 токенов/пост).
+Стоимость: ~$0.0005/день (sonar, ~500 токенов/пост).
 """
 
 import logging
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-WRITER_MODEL     = "sonar-pro"
+WRITER_MODEL     = "sonar"        # sonar дешевле и быстрее sonar-pro; A/B тест: -88% цена, URL 4/4 vs 2/4
 TEMPERATURE      = 0.7
 MIN_POST_CHARS   = 300
 MAX_POST_CHARS   = 700    # Мягкий потолок для single, жёсткий — в Formatter
@@ -203,6 +204,11 @@ async def _call_perplexity(
         ],
         temperature=TEMPERATURE,
         max_tokens=max_tokens,
+        extra_body={
+            # Минимальный контекст поиска — Writer использует RSS-контент,
+            # веб-поиск не нужен. Снижает стоимость и устраняет цитаты.
+            "web_search_options": {"search_context_size": "low"},
+        },
     )
     text    = response.choices[0].message.content.strip()
     # Убираем цитаты Perplexity вида [1], [2][3] — они не нужны в постах

@@ -136,6 +136,14 @@ async def _call_perplexity(article: RawArticleCandidate) -> dict:
         ],
         temperature=0.1,   # Низкая температура — стабильный JSON
         max_tokens=512,
+        extra_body={
+            # Fact-Checker активно использует веб-поиск для верификации —
+            # "high" даёт больше источников и точнее определяет достоверность.
+            "web_search_options": {
+                "search_context_size": "high",
+                "search_recency_filter": "week",   # Только свежие новости
+            },
+        },
     )
 
     raw_content = response.choices[0].message.content.strip()
