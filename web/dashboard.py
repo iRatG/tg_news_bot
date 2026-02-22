@@ -197,10 +197,11 @@ async def recent_posts(_=Depends(verify_credentials)):
 # ── Ручной запуск пайплайна ───────────────────────────────────────────────────
 
 @app.post("/api/pipeline/run")
-async def manual_run(_=Depends(verify_credentials)):
+async def manual_run(is_morning: bool = False, _=Depends(verify_credentials)):
     """
     Запускает пайплайн вручную (из дашборда или через API).
 
+    Параметр is_morning=true запускает режим дайджеста (утренний прогон).
     Создаёт прогон и запускает его в фоне через asyncio.create_task.
     Возвращает run_id немедленно.
     """
@@ -208,12 +209,13 @@ async def manual_run(_=Depends(verify_credentials)):
     from core.pipeline import create_pipeline_run, run_pipeline
 
     run_id = await create_pipeline_run()
+    mode = "digest" if is_morning else "single"
 
     async def _run():
         try:
-            await run_pipeline(run_id)
+            await run_pipeline(run_id, is_morning=is_morning)
         except Exception as exc:
             logger.error(f"[dashboard] Ошибка ручного запуска: {exc}")
 
     asyncio.create_task(_run())
-    return {"run_id": run_id, "status": "started"}
+    return {"run_id": run_id, "status": "started", "mode": mode}
