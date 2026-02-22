@@ -34,6 +34,7 @@ from __future__ import annotations
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -200,6 +201,8 @@ async def _call_perplexity(
         max_tokens=max_tokens,
     )
     text    = response.choices[0].message.content.strip()
+    # Убираем цитаты Perplexity вида [1], [2][3] — они не нужны в постах
+    text    = re.sub(r'\[\d+\]', '', text).strip()
     in_tok  = getattr(response.usage, "prompt_tokens",     0)
     out_tok = getattr(response.usage, "completion_tokens", 0)
     return text, in_tok, out_tok
@@ -220,7 +223,8 @@ def _build_user_prompt(
         "2. Что произошло — 2-3 предложения\n"
         "3. Почему важно — 1-2 предложения\n"
         "4. 🔗 Источник: источник.com (URL)\n\n"
-        "Язык: русский. Длина: 400-600 символов. Без \"в заключении\", без воды.\n\n"
+        "Язык: русский. Длина: 400-600 символов. Без \"в заключении\", без воды. "
+        "Без цитат в формате [1][2][3].\n\n"
         f"Заголовок: {article.title}\n"
         f"Содержание: {article.content[:1000]}\n"
         f"Источник: {article.source_name}\n"
@@ -237,7 +241,8 @@ def _build_longread_prompt(article: RawArticleCandidate) -> str:
         "- Первая строка: 📌 Заголовок\n"
         "- 3-5 разделов через 🟡 Название раздела (3-5 предложений каждый)\n"
         "- Финал: источник.com (URL)\n\n"
-        "Язык: русский. Длина: 800-1200 символов. Без \"в заключении\".\n\n"
+        "Язык: русский. Длина: 800-1200 символов. Без \"в заключении\". "
+        "Без цитат в формате [1][2][3].\n\n"
         f"Заголовок: {article.title}\n"
         f"Содержание: {article.content[:2000]}\n"
         f"Источник: {article.source_name}\n"
@@ -275,7 +280,7 @@ def _build_digest_prompt(
         "источник.com (URL)\n\n"
         "Между новостями — пустая строка.\n"
         f"Весь пост — до {DIGEST_MAX_CHARS} символов.\n"
-        "Язык: русский. Без лишних слов.\n\n"
+        "Язык: русский. Без лишних слов. Без цитат в формате [1][2][3].\n\n"
         f"Новости:\n{articles_block}"
     )
 

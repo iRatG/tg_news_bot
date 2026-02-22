@@ -160,6 +160,9 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     - Незакрытый <b> → добавляет </b>
     - Текст длиннее max_chars → жёсткая обрезка до последнего пробела
     """
+    # Убираем цитаты Perplexity вида [1], [2][3] (второй уровень защиты)
+    text = re.sub(r'\[\d+\]', '', text)
+
     # <br> → перенос строки
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
 
