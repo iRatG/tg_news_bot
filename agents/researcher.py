@@ -287,8 +287,9 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
             {"status": ArticleStatus.NEW},
         )).fetchall()
 
-    # Индекс RSS-дат по url (есть только для свежепарсенных в этом прогоне).
-    # Для остальных статей пула используем fetched_at из БД как proxy.
+    # Индекс RSS-дат по url — используется ТОЛЬКО для поля published_at кандидата
+    # (для отображения). Для скоринга RSS pub_at НЕ подходит: старые посты в RSS
+    # имеют pub_at 2023-2024, что даёт нулевой бонус свежести.
     pub_index: Dict[str, Optional[datetime]] = {
         a["url"]: a["published_at"] for a in all_raw
     }
@@ -296,13 +297,30 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
     # 6. Скоринг
     scored: List[RawArticleCandidate] = []
     for row in pool_rows:
-        db_id, title, url, content, src_name, src_url, category, fetched_at = row
+        db_id, title, url, content, src_name, src_url, category, fetched_at_raw = row
         content = content or ""
-        # Предпочитаем RSS-дату публикации; при её отсутствии — дата загрузки в БД
-        pub = pub_index.get(url) or fetched_at
 
-        score = _compute_score(title, content, pub)
+        # Парсим fetched_at из SQLite (aiosqlite возвращает строку '2026-02-22 09:04:15')
+        if isinstance(fetched_at_raw, str):
+            try:
+                fetched_at_dt = datetime.strptime(
+                    fetched_at_raw[:19], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+            except ValueError:
+                fetched_at_dt = datetime.now(timezone.utc)
+        elif fetched_at_raw is None:
+            fetched_at_dt = datetime.now(timezone.utc)
+        else:
+            fetched_at_dt = fetched_at_raw
+            if fetched_at_dt.tzinfo is None:
+                fetched_at_dt = fetched_at_dt.replace(tzinfo=timezone.utc)
+
+        # Бонус свежести считаем по fetched_at — когда статья впервые появилась в нашем пуле.
+        # Это корректнее RSS pub_at: старые блог-посты в RSS дают pub_at 2023/2024 → бонус 0.
+        score = _compute_score(title, content, fetched_at_dt)
+
         if score >= MIN_SCORE:
+            rss_pub = pub_index.get(url)
             scored.append(RawArticleCandidate(
                 db_id=db_id,
                 title=title,
@@ -310,7 +328,7 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
                 content=content[:3000],
                 source_name=src_name,
                 source_url=src_url,
-                published_at=pub if pub is not None else datetime.now(timezone.utc),
+                published_at=rss_pub or fetched_at_dt,
                 score=score,
                 category=category,
             ))
