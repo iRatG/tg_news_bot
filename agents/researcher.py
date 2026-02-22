@@ -61,6 +61,95 @@ MIN_SCORE    = 15   # Минимальный порог попадания в к
 MAX_RESULTS  = 5    # Максимум кандидатов на выходе
 FETCH_WORKERS = 5   # Потоков для параллельного парсинга
 INSERT_BATCH  = 100 # Размер батча INSERT (обход лимита SQLite в 999 переменных)
+BRAND_CAP    = 2    # Макс. Tier 2/3 статей одного бренда в финальной выборке
+
+
+# ── Детекция AI-бренда ────────────────────────────────────────────────────────
+
+_BRAND_KEYWORDS: Dict[str, List[str]] = {
+    "openai":     ["openai", "chatgpt", "chat gpt", "gpt-4", "gpt-3",
+                   "gpt4", "gpt3", "sora", "dall-e", "dalle",
+                   "o1 model", "o3 model"],
+    "anthropic":  ["anthropic", "claude"],
+    "google":     ["google deepmind", "google ai", "gemini", "deepmind",
+                   "gemma", "vertex ai", "google bard"],
+    "deepseek":   ["deepseek", "deep seek"],
+    "meta":       ["meta ai", "meta llama", "llama 3", "llama-3", "llama3",
+                   "llama 2", "llama-2", "llama2", "llama"],
+    "perplexity": ["perplexity"],
+    "mistral":    ["mistral", "mixtral"],
+    "xai":        ["xai", "x.ai", "grok"],
+}
+
+
+def _detect_brand(title: str, content: str, url: str) -> str:
+    """
+    Определяет AI-бренд по заголовку, началу содержимого и URL.
+
+    Проверяет бренды в порядке объявления в _BRAND_KEYWORDS.
+    При совпадении нескольких брендов побеждает первый.
+    Возвращает lowercase имя бренда или 'other'.
+    """
+    haystack = (title + " " + content[:500] + " " + url).lower()
+    for brand, keywords in _BRAND_KEYWORDS.items():
+        if any(kw in haystack for kw in keywords):
+            return brand
+    return "other"
+
+
+# ── Детекция уровня важности (tier) ──────────────────────────────────────────
+
+_TIER1_KEYWORDS = {
+    # English
+    "arxiv", "paper", "research", "benchmark", "study", "survey",
+    "state-of-the-art", "sota", "outperforms", "architecture",
+    "novel", "breakthrough", "preprint", "open-source", "open source",
+    "weights", "dataset", "evaluation", "technical report",
+    # Russian
+    "исследование", "статья", "доклад", "бенчмарк", "архитектура",
+    "разбор", "анализ", "открытие", "датасет",
+}
+
+_TIER3_KEYWORDS = {
+    # English
+    "funding", "investment", "valuation", "acquisition", "merger",
+    "partnership", "deal", "ipo", "layoff", "layoffs", "hiring",
+    "revenue", "profit", "series a", "series b", "series c",
+    # Russian
+    "инвестиции", "финансирование", "сделка", "партнерство",
+    "поглощение", "слияние", "увольнения",
+}
+
+_TIER_MULT: Dict[str, float] = {
+    "breakthrough": 2.0,   # прорывные статьи — всегда в приоритете
+    "news":         1.0,   # обычные отраслевые новости
+    "noise":        0.5,   # деловой шум — штраф
+}
+
+
+def _detect_tier(title: str, content: str) -> str:
+    """
+    Определяет уровень важности статьи.
+
+    breakthrough — научная работа, бенчмарк, новая архитектура, открытие
+    news         — отраслевая новость (выход модели, обновление сервиса)
+    noise        — деловой шум (инвестиции, партнёрства, кадровые новости)
+
+    Заголовок значимее содержимого (×2 вес).
+    """
+    title_lower   = title.lower()
+    content_lower = content.lower() if content else ""
+
+    t1 = (sum(2 for kw in _TIER1_KEYWORDS if kw in title_lower)
+          + sum(1 for kw in _TIER1_KEYWORDS if kw in content_lower))
+    t3 = (sum(2 for kw in _TIER3_KEYWORDS if kw in title_lower)
+          + sum(1 for kw in _TIER3_KEYWORDS if kw in content_lower))
+
+    if t1 >= 2:
+        return "breakthrough"
+    if t3 >= 2 and t1 == 0:
+        return "noise"
+    return "news"
 
 
 # ── Выходная структура ────────────────────────────────────────────────────────
@@ -69,18 +158,25 @@ INSERT_BATCH  = 100 # Размер батча INSERT (обход лимита SQ
 class RawArticleCandidate:
     """Статья-кандидат, прошедшая первичный отбор по score."""
 
-    db_id:        int
-    title:        str
-    url:          str
-    content:      str
-    source_name:  str
-    source_url:   str
-    published_at: datetime
-    score:        int
-    category:     str = ""
+    db_id:          int
+    title:          str
+    url:            str
+    content:        str
+    source_name:    str
+    source_url:     str
+    published_at:   datetime
+    score:          int           # базовый score (ключевые слова + свежесть)
+    category:       str   = ""
+    brand:          str   = "other"   # AI-компания: openai/anthropic/google/…
+    tier:           str   = "news"    # breakthrough/news/noise
+    adjusted_score: float = 0.0       # score × tier_mult × diversity_mult
 
     def __repr__(self) -> str:
-        return f"<Candidate score={self.score} title={self.title[:60]!r}>"
+        return (
+            f"<Candidate adj={self.adjusted_score:.1f} "
+            f"tier={self.tier} brand={self.brand} "
+            f"title={self.title[:50]!r}>"
+        )
 
 
 # ── Вспомогательные функции ───────────────────────────────────────────────────
@@ -210,6 +306,56 @@ async def _bulk_insert(articles: List[dict]) -> None:
             await session.commit()
 
 
+async def _get_brand_history(days: int = 7) -> Dict[str, int]:
+    """
+    Возвращает количество опубликованных постов по AI-брендам за последние N дней.
+
+    Читает таблицу published_posts, детектирует бренд из post_text + source_url.
+    При ошибке БД возвращает пустой словарь (нейтральное поведение для diversity_mult).
+    """
+    try:
+        async with async_session_factory() as session:
+            rows = (await session.execute(
+                text("""
+                    SELECT source_url, source_name, post_text
+                    FROM published_posts
+                    WHERE published_at > datetime('now', :window)
+                """),
+                {"window": f"-{days} days"},
+            )).fetchall()
+    except Exception as exc:
+        logger.warning(f"[researcher] Не удалось прочитать историю брендов: {exc}")
+        return {}
+
+    brand_counts: Dict[str, int] = {}
+    for source_url, source_name, post_text in rows:
+        brand = _detect_brand(
+            post_text[:300] if post_text else "",
+            "",
+            (source_url or "") + " " + (source_name or ""),
+        )
+        brand_counts[brand] = brand_counts.get(brand, 0) + 1
+    return brand_counts
+
+
+def _compute_diversity_mult(brand: str, brand_counts: Dict[str, int]) -> float:
+    """
+    Множитель разнообразия для бренда на основе его доли в последних публикациях.
+
+    Формула: 1.0 + (1.0 − доля_бренда_за_7_дней)
+    • Бренд никогда не публиковался (0%)  → mult = 2.0  (максимальный буст)
+    • Бренд занимает 50% публикаций       → mult = 1.5
+    • Бренд занимает 100% публикаций      → mult = 1.0  (нет штрафа)
+
+    Доминирующий бренд не штрафуется — breakthrough-статья OpenAI всегда пройдёт.
+    """
+    total = sum(brand_counts.values())
+    if total == 0:
+        return 1.5  # нет истории → умеренный буст для всех
+    brand_ratio = brand_counts.get(brand, 0) / total
+    return round(1.0 + (1.0 - brand_ratio), 3)
+
+
 # ── Публичный интерфейс ───────────────────────────────────────────────────────
 
 async def fetch_and_rank() -> List[RawArticleCandidate]:
@@ -294,7 +440,10 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
         a["url"]: a["published_at"] for a in all_raw
     }
 
-    # 6. Скоринг
+    # 6. Скоринг: базовый score × tier_mult × diversity_mult
+    brand_history = await _get_brand_history()
+    logger.debug(f"[researcher] История брендов за 7 дней: {brand_history}")
+
     scored: List[RawArticleCandidate] = []
     for row in pool_rows:
         db_id, title, url, content, src_name, src_url, category, fetched_at_raw = row
@@ -315,11 +464,17 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
             if fetched_at_dt.tzinfo is None:
                 fetched_at_dt = fetched_at_dt.replace(tzinfo=timezone.utc)
 
-        # Бонус свежести считаем по fetched_at — когда статья впервые появилась в нашем пуле.
-        # Это корректнее RSS pub_at: старые блог-посты в RSS дают pub_at 2023/2024 → бонус 0.
-        score = _compute_score(title, content, fetched_at_dt)
+        # Базовый score: ключевые слова + бонус свежести по fetched_at.
+        # fetched_at корректнее RSS pub_at: старые блог-посты дают pub_at 2023/2024 → бонус 0.
+        base_score = _compute_score(title, content, fetched_at_dt)
 
-        if score >= MIN_SCORE:
+        if base_score >= MIN_SCORE:
+            brand          = _detect_brand(title, content, url)
+            tier           = _detect_tier(title, content)
+            diversity_mult = _compute_diversity_mult(brand, brand_history)
+            tier_mult      = _TIER_MULT[tier]
+            adjusted_score = base_score * tier_mult * diversity_mult
+
             rss_pub = pub_index.get(url)
             scored.append(RawArticleCandidate(
                 db_id=db_id,
@@ -329,12 +484,29 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
                 source_name=src_name,
                 source_url=src_url,
                 published_at=rss_pub or fetched_at_dt,
-                score=score,
+                score=base_score,
                 category=category,
+                brand=brand,
+                tier=tier,
+                adjusted_score=adjusted_score,
             ))
 
-    scored.sort(key=lambda c: c.score, reverse=True)
-    candidates = scored[:MAX_RESULTS]
+    scored.sort(key=lambda c: c.adjusted_score, reverse=True)
+
+    # Soft cap: Tier 1 (breakthrough) всегда включается без ограничений.
+    # Для Tier 2/3 — не более BRAND_CAP статей одного бренда в финальной выборке.
+    brand_in_result: Dict[str, int] = {}
+    candidates: List[RawArticleCandidate] = []
+    for c in scored:
+        if c.tier == "breakthrough":
+            candidates.append(c)
+        else:
+            count = brand_in_result.get(c.brand, 0)
+            if count < BRAND_CAP:
+                candidates.append(c)
+                brand_in_result[c.brand] = count + 1
+        if len(candidates) >= MAX_RESULTS:
+            break
 
     # 7. Обновляем статистику источников
     async with async_session_factory() as session:
@@ -351,11 +523,16 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
         await session.commit()
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
+    brand_summary = " ".join(f"{c.brand}({c.tier[0]})" for c in candidates)
     logger.info(
         f"[researcher] Готово: {len(candidates)}/{len(scored)} кандидатов "
-        f"| пул={len(pool_rows)} | {elapsed_ms}мс"
+        f"| пул={len(pool_rows)} | [{brand_summary}] | {elapsed_ms}мс"
     )
     for c in candidates:
-        logger.debug(f"  [{c.score:3d}] {c.source_name}: {c.title[:80]}")
+        logger.debug(
+            f"  [base={c.score:3d} adj={c.adjusted_score:5.1f} "
+            f"tier={c.tier[0].upper()} brand={c.brand:12s}] "
+            f"{c.source_name}: {c.title[:55]}"
+        )
 
     return candidates
