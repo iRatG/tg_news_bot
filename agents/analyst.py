@@ -153,8 +153,10 @@ async def evaluate_and_publish(
         logger.warning(f"[analyst] REJECT (quality): {reason}")
         return AnalystResult(article_id=article.db_id, published=False, reason=reason)
 
-    if char_count > 1024:
-        reason = f"Пост превышает лимит Telegram: {char_count} симв. (макс. 1024)"
+    # Лимит зависит от формата: longread/digest — 4096, single — 1024
+    max_len = 4096 if formatter_result.post_format in ("longread", "digest") else 1024
+    if char_count > max_len:
+        reason = f"Пост превышает лимит: {char_count} симв. (макс. {max_len})"
         await _set_article_status(article.db_id, ArticleStatus.REJECTED)
         logger.warning(f"[analyst] REJECT (quality): {reason}")
         return AnalystResult(article_id=article.db_id, published=False, reason=reason)

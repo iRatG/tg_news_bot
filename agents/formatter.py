@@ -6,17 +6,24 @@ from __future__ import annotations
 Применяет Telegram HTML-разметку к тексту поста и опционально
 генерирует иллюстрацию через Leonardo AI.
 
+Лимиты по формату:
+    single   — 1024 символа (с картинкой, Telegram caption limit)
+    longread — 4096 символов (без картинки, Telegram message limit)
+    digest   — 4096 символов (без картинки, Telegram message limit)
+
+Картинка генерируется ТОЛЬКО для single-поста при image_enabled=true.
+Для longread и digest картинка не генерируется независимо от настроек.
+
 Алгоритм:
-    1. Передаёт текст в Perplexity sonar-pro с инструкцией добавить HTML-теги Telegram.
-    2. Проверяет баланс тегов <b> и корректность <a href="...">.
-    3. Если image_enabled=true и LEONARDO_API_KEY задан — генерирует картинку:
+    1. Читает post_format из WriterResult для выбора лимита и режима картинки.
+    2. Передаёт текст в Perplexity sonar-pro с инструкцией добавить HTML-теги Telegram.
+    3. Проверяет баланс тегов <b> и корректность <a href="...">.
+    4. Если single + image_enabled=true + LEONARDO_API_KEY задан — генерирует картинку:
        a) sonar-pro создаёт image-prompt (до 100 слов)
        b) Leonardo AI API: POST generations → poll → download bytes в память
        c) При любой ошибке Leonardo — пропускаем картинку, не блокируем пайплайн
-    4. Проверяет что итоговый текст <= 1024 символа (лимит Telegram caption).
 
-Примечание: DeepSeek geo-blocked на RU VPS. Perplexity sonar-pro доступен глобально.
-
+Примечание: Perplexity sonar-pro доступен глобально с RU VPS.
 Стоимость: ~$0.001/день без картинок; ~$0.06/день с Leonardo AI.
 """
 
@@ -41,10 +48,11 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-FORMATTER_MODEL     = "sonar-pro"
-TELEGRAM_MAX_CHARS  = 1024   # Жёсткий лимит caption/message Telegram
-LEONARDO_POLL_SEC   = 3      # Интервал опроса статуса генерации
-LEONARDO_TIMEOUT_SEC = 30    # Максимальное ожидание Leonardo
+FORMATTER_MODEL      = "sonar-pro"
+TELEGRAM_MAX_SINGLE  = 1024   # Лимит caption (с картинкой) и short message
+TELEGRAM_MAX_LONG    = 4096   # Лимит обычного сообщения (без картинки)
+LEONARDO_POLL_SEC    = 3      # Интервал опроса статуса генерации
+LEONARDO_TIMEOUT_SEC = 30     # Максимальное ожидание Leonardo
 
 
 # ── Выходная структура ────────────────────────────────────────────────────────
@@ -56,6 +64,7 @@ class FormatterResult:
     article_id:     int
     formatted_text: str
     image_bytes:    Optional[bytes]   # None если нет картинки или Leonardo упал
+    post_format:    str               # 'single' | 'longread' | 'digest'
     input_tokens:   int
     output_tokens:  int
     latency_ms:     int
@@ -64,7 +73,7 @@ class FormatterResult:
         img = f"{len(self.image_bytes)} bytes" if self.image_bytes else "no image"
         return (
             f"<FormatterResult article_id={self.article_id} "
-            f"chars={len(self.formatted_text)} {img}>"
+            f"format={self.post_format} chars={len(self.formatted_text)} {img}>"
         )
 
 
@@ -131,12 +140,12 @@ async def _format_html(post_text: str) -> tuple[str, int, int]:
     return text, in_tok, out_tok
 
 
-def _validate_html(text: str) -> str:
+def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     """
     Проверяет и исправляет базовые HTML-проблемы.
 
     - Незакрытый <b> → добавляет </b>
-    - Текст длиннее TELEGRAM_MAX_CHARS → жёсткая обрезка до последнего пробела
+    - Текст длиннее max_chars → жёсткая обрезка до последнего пробела
     """
     # Баланс тега <b>
     if text.count("<b>") != text.count("</b>"):
@@ -146,15 +155,14 @@ def _validate_html(text: str) -> str:
         if opens > closes:
             text += "</b>" * (opens - closes)
 
-    # Жёсткий лимит Telegram
-    if len(text) > TELEGRAM_MAX_CHARS:
+    # Жёсткий лимит
+    if len(text) > max_chars:
         logger.warning(
-            f"[formatter] Текст {len(text)} симв. > {TELEGRAM_MAX_CHARS} — обрезаю"
+            f"[formatter] Текст {len(text)} симв. > {max_chars} — обрезаю"
         )
-        text = text[:TELEGRAM_MAX_CHARS]
-        # Обрезаем до последнего пробела чтобы не резать слово
+        text = text[:max_chars]
         last_space = text.rfind(" ")
-        if last_space > TELEGRAM_MAX_CHARS - 50:
+        if last_space > max_chars - 50:
             text = text[:last_space]
 
     return text
@@ -208,11 +216,11 @@ def _call_leonardo(image_prompt: str) -> Optional[bytes]:
             "https://cloud.leonardo.ai/api/rest/v1/generations",
             headers=headers,
             json={
-                "modelId":       model_id,
-                "prompt":        image_prompt,
-                "width":         1024,
-                "height":        576,
-                "num_images":    1,
+                "modelId":        model_id,
+                "prompt":         image_prompt,
+                "width":          1024,
+                "height":         576,
+                "num_images":     1,
                 "guidance_scale": 7,
             },
             timeout=15,
@@ -273,8 +281,12 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
     """
     Форматирует пост: HTML-разметка + опциональная картинка Leonardo AI.
 
-    Сбой Leonardo AI не прерывает пайплайн — пост уходит без картинки.
-    Все решения по изображениям управляются через settings (image_enabled).
+    Лимит символов зависит от формата:
+        single   — 1024 (с возможной картинкой)
+        longread — 4096 (без картинки)
+        digest   — 4096 (без картинки)
+
+    Картинка генерируется ТОЛЬКО для single при image_enabled=true.
 
     Args:
         writer_result: Результат от агента Writer.
@@ -283,10 +295,21 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
         FormatterResult с отформатированным текстом и bytes картинки (или None).
     """
     t0 = time.monotonic()
-    logger.info(f"[formatter] Форматирование поста article_id={writer_result.article_id}")
+    post_format = writer_result.post_format
+    logger.info(
+        f"[formatter] Форматирование поста article_id={writer_result.article_id} "
+        f"format={post_format}"
+    )
 
     total_in_tok  = 0
     total_out_tok = 0
+
+    # Лимит символов по формату
+    max_chars = (
+        TELEGRAM_MAX_LONG
+        if post_format in ("longread", "digest")
+        else TELEGRAM_MAX_SINGLE
+    )
 
     # ── Шаг 1: HTML-форматирование ────────────────────────────────────────────
     try:
@@ -295,30 +318,35 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
         total_out_tok += out_tok
     except Exception as exc:
         logger.error(f"[formatter] Ошибка HTML-форматирования: {exc}")
-        # Fallback: возвращаем оригинальный текст без разметки
         formatted = writer_result.post_text
         logger.warning("[formatter] Используем текст без HTML-разметки (fallback)")
 
-    formatted = _validate_html(formatted)
+    formatted = _validate_html(formatted, max_chars=max_chars)
 
-    # ── Шаг 2: Генерация картинки (опционально) ───────────────────────────────
+    # ── Шаг 2: Генерация картинки (только для single) ─────────────────────────
     image_bytes: Optional[bytes] = None
 
     image_enabled = await get_setting("image_enabled", "false")
-    if image_enabled.lower() == "true" and settings.LEONARDO_API_KEY:
+    can_generate_image = (
+        post_format == "single"
+        and image_enabled.lower() == "true"
+        and bool(settings.LEONARDO_API_KEY)
+    )
+
+    if can_generate_image:
         logger.info("[formatter] Генерация изображения через Leonardo AI...")
         try:
-            img_prompt = await _generate_image_prompt(writer_result.post_text)
+            img_prompt  = await _generate_image_prompt(writer_result.post_text)
             logger.debug(f"[formatter] Image prompt: {img_prompt[:80]}")
-
-            # Leonardo синхронный (polling) — запускаем напрямую
             image_bytes = _call_leonardo(img_prompt)
         except Exception as exc:
-            # Любая ошибка Leonardo не блокирует публикацию
             logger.warning(f"[formatter] Leonardo полностью упал: {exc}")
             image_bytes = None
     else:
-        logger.debug("[formatter] Генерация изображений отключена")
+        if post_format in ("longread", "digest"):
+            logger.debug(f"[formatter] Картинка пропущена (format={post_format})")
+        else:
+            logger.debug("[formatter] Генерация изображений отключена")
 
     latency = int((time.monotonic() - t0) * 1000)
     logger.info(
@@ -331,6 +359,7 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
         article_id=writer_result.article_id,
         formatted_text=formatted,
         image_bytes=image_bytes,
+        post_format=post_format,
         input_tokens=total_in_tok,
         output_tokens=total_out_tok,
         latency_ms=latency,

@@ -50,16 +50,26 @@ async def _run_pipeline_job() -> None:
     """
     Точка входа для APScheduler — создаёт прогон и запускает пайплайн.
 
-    Оборачивает pipeline.run_pipeline() в управление run_id и
-    защищает планировщик от необработанных исключений.
+    Определяет режим запуска: если текущий час (МСК) совпадает с
+    morning_digest_hour — запускает режим дайджеста (is_morning=True).
     """
     # Ленивый импорт во избежание циклических зависимостей при старте
+    import pytz
+    from datetime import datetime
+    from core.config import get_setting
     from core.pipeline import create_pipeline_run, run_pipeline
 
     try:
-        run_id = await create_pipeline_run()
-        logger.info(f"[scheduler] Запуск запланированного прогона #{run_id}")
-        await run_pipeline(run_id)
+        morning_enabled = (await get_setting("morning_digest_enabled", "true")).lower() == "true"
+        morning_hour    = int(await get_setting("morning_digest_hour", "7"))
+        msk_tz          = pytz.timezone("Europe/Moscow")
+        now_msk         = datetime.now(msk_tz)
+        is_morning      = morning_enabled and (now_msk.hour == morning_hour)
+
+        run_id   = await create_pipeline_run()
+        mode_str = "дайджест" if is_morning else "одиночный"
+        logger.info(f"[scheduler] Запуск прогона #{run_id} ({mode_str})")
+        await run_pipeline(run_id, is_morning=is_morning)
     except Exception as exc:
         logger.error(f"[scheduler] Ошибка запланированного прогона: {exc}", exc_info=True)
 

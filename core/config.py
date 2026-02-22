@@ -1,5 +1,9 @@
+import logging
 import os
+
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -62,3 +66,29 @@ async def get_setting(key: str, default: str = "") -> str:
             return row[0] if row else default
     except Exception:
         return default
+
+
+async def set_setting(key: str, value: str) -> None:
+    """
+    Записывает или обновляет настройку в таблице settings (UPSERT).
+
+    Используется для сохранения ротируемого стиля постов и других
+    динамических параметров без перезапуска сервиса.
+    """
+    from sqlalchemy import text
+    from db.database import async_session_factory
+
+    try:
+        async with async_session_factory() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO settings (key, value, updated_at)
+                    VALUES (:key, :value, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE
+                    SET value = :value, updated_at = datetime('now')
+                """),
+                {"key": key, "value": value},
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.error(f"[config] Ошибка записи настройки '{key}': {exc}")

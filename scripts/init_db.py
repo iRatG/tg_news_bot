@@ -62,6 +62,9 @@ DEFAULT_SETTINGS = [
     ("image_style",         "futuristic digital art, no text", "Leonardo AI image style prompt"),
     ("posts_per_run",       "1",                     "Number of posts to publish per single pipeline run"),
     ("writer_system_prompt", WRITER_SYSTEM_PROMPT,   "System prompt for the Writer agent"),
+    ("post_style_current",  "curator",               "Текущий стиль постов: curator|tech_analyst|practitioner|skeptic"),
+    ("morning_digest_hour", "7",                     "Час утреннего дайджеста (МСК, 0-23)"),
+    ("morning_digest_enabled", "true",               "Включить утренний дайджест (true/false)"),
 ]
 
 DEFAULT_SCHEDULE_SLOTS = [
