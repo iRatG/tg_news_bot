@@ -16,15 +16,15 @@ from __future__ import annotations
 
 Алгоритм:
     1. Читает post_format из WriterResult для выбора лимита и режима картинки.
-    2. Передаёт текст в Perplexity sonar-pro с инструкцией добавить HTML-теги Telegram.
+    2. Передаёт текст в DeepSeek deepseek-chat с инструкцией добавить HTML-теги Telegram.
     3. Проверяет баланс тегов <b> и корректность <a href="...">.
     4. Если single + image_enabled=true + LEONARDO_API_KEY задан — генерирует картинку:
-       a) sonar-pro создаёт image-prompt (до 100 слов)
+       a) deepseek-chat создаёт image-prompt (до 100 слов)
        b) Leonardo AI API: POST generations → poll → download bytes в память
        c) При любой ошибке Leonardo — пропускаем картинку, не блокируем пайплайн
 
-Примечание: Perplexity sonar-pro доступен глобально с RU VPS.
-Стоимость: ~$0.001/день без картинок; ~$0.06/день с Leonardo AI.
+Примечание: DeepSeek deepseek-chat доступен с RU VPS (проверено 2026-02-22).
+Стоимость: ~$0.0001/день без картинок; ~$0.06/день с Leonardo AI.
 """
 
 import logging
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-FORMATTER_MODEL      = "sonar-pro"
+FORMATTER_MODEL      = "deepseek-chat"
 TELEGRAM_MAX_SINGLE  = 1024   # Лимит caption (с картинкой) и short message
 TELEGRAM_MAX_LONG    = 4096   # Лимит обычного сообщения (без картинки)
 LEONARDO_POLL_SEC    = 3      # Интервал опроса статуса генерации
@@ -117,14 +117,14 @@ def _format_prompt(post_text: str) -> str:
 @_retryable
 async def _format_html(post_text: str) -> tuple[str, int, int]:
     """
-    Применяет Telegram HTML-разметку через Perplexity sonar-pro.
+    Применяет Telegram HTML-разметку через DeepSeek deepseek-chat.
 
     Returns:
         (formatted_text, input_tokens, output_tokens)
     """
     client = openai.AsyncOpenAI(
-        api_key=settings.PERPLEXITY_API_KEY,
-        base_url="https://api.perplexity.ai",
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com",
     )
     response = await client.chat.completions.create(
         model=FORMATTER_MODEL,
@@ -197,10 +197,10 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
 
 @_retryable
 async def _generate_image_prompt(post_text: str) -> str:
-    """Генерирует краткий image-prompt для Leonardo AI через Perplexity sonar-pro."""
+    """Генерирует краткий image-prompt для Leonardo AI через DeepSeek deepseek-chat."""
     client = openai.AsyncOpenAI(
-        api_key=settings.PERPLEXITY_API_KEY,
-        base_url="https://api.perplexity.ai",
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com",
     )
     response = await client.chat.completions.create(
         model=FORMATTER_MODEL,

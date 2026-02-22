@@ -9,7 +9,7 @@ from __future__ import annotations
 Алгоритм (одиночный пост):
     1. Определяет формат: single или longread по ключевым словам и длине контента.
     2. Читает текущий стиль из settings, сохраняет следующий (ротация).
-    3. Вызывает Perplexity sonar-pro с выбранным системным промптом.
+    3. Вызывает DeepSeek deepseek-chat с выбранным системным промптом.
     4. Возвращает WriterResult с полем post_format.
 
 Алгоритм (дайджест):
@@ -29,8 +29,9 @@ from __future__ import annotations
     practitioner — что применимо прямо сейчас
     skeptic      — ограничения и что умолчали
 
-Примечание: Perplexity sonar-pro доступен глобально с RU VPS.
-Стоимость: ~$0.003/день (sonar-pro, ~800 токенов/пост).
+Примечание: DeepSeek deepseek-chat доступен с RU VPS (проверено 2026-02-22).
+Fact-Checker остаётся на Perplexity sonar (требует веб-поиск для верификации).
+Стоимость: ~$0.0003/день (deepseek-chat, ~800 токенов/пост, ~10x дешевле sonar-pro).
 """
 
 import logging
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-WRITER_MODEL     = "sonar-pro"
+WRITER_MODEL     = "deepseek-chat"
 TEMPERATURE      = 0.7
 MIN_POST_CHARS   = 300
 MAX_POST_CHARS   = 700    # Мягкий потолок для single, жёсткий — в Formatter
@@ -173,23 +174,26 @@ def _retryable(func):
     )(func)
 
 
-# ── Вызов Perplexity API ──────────────────────────────────────────────────────
+# ── Вызов DeepSeek API ────────────────────────────────────────────────────────
 
 @_retryable
-async def _call_perplexity(
+async def _call_deepseek(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 600,
 ) -> tuple[str, int, int]:
     """
-    Вызывает Perplexity sonar-pro через OpenAI-совместимый API.
+    Вызывает DeepSeek deepseek-chat через OpenAI-совместимый API.
+
+    DeepSeek доступен с RU VPS (нет гео-блокировки, проверено 2026-02-22).
+    Не имеет встроенного веб-поиска — поэтому не используется для Fact-Checker.
 
     Returns:
         (текст, input_tokens, output_tokens)
     """
     client = openai.AsyncOpenAI(
-        api_key=settings.PERPLEXITY_API_KEY,
-        base_url="https://api.perplexity.ai",
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com",
     )
     response = await client.chat.completions.create(
         model=WRITER_MODEL,
@@ -201,8 +205,6 @@ async def _call_perplexity(
         max_tokens=max_tokens,
     )
     text    = response.choices[0].message.content.strip()
-    # Убираем цитаты Perplexity вида [1], [2][3] — они не нужны в постах
-    text    = re.sub(r'\[\d+\]', '', text).strip()
     in_tok  = getattr(response.usage, "prompt_tokens",     0)
     out_tok = getattr(response.usage, "completion_tokens", 0)
     return text, in_tok, out_tok
@@ -332,11 +334,11 @@ async def write_post(
     max_tokens = 1200 if post_format == "longread" else 600
 
     try:
-        post_text, in_tok, out_tok = await _call_perplexity(
+        post_text, in_tok, out_tok = await _call_deepseek(
             system_prompt, user_prompt, max_tokens=max_tokens
         )
     except Exception as exc:
-        logger.error(f"[writer] Ошибка Perplexity API: {exc}")
+        logger.error(f"[writer] Ошибка DeepSeek API: {exc}")
         raise
 
     latency    = int((time.monotonic() - t0) * 1000)
@@ -392,11 +394,11 @@ async def write_digest(
     user_prompt   = _build_digest_prompt(articles)
 
     try:
-        post_text, in_tok, out_tok = await _call_perplexity(
+        post_text, in_tok, out_tok = await _call_deepseek(
             system_prompt, user_prompt, max_tokens=1500
         )
     except Exception as exc:
-        logger.error(f"[writer] Ошибка Perplexity API (дайджест): {exc}")
+        logger.error(f"[writer] Ошибка DeepSeek API (дайджест): {exc}")
         raise
 
     latency    = int((time.monotonic() - t0) * 1000)
