@@ -10,14 +10,13 @@ from __future__ import annotations
 Алгоритм:
     1. Загружает системный промпт из БД (с fallback на захардкоженный default).
     2. Формирует user-запрос из заголовка, содержимого и источников верификации.
-    3. Вызывает Perplexity sonar-pro через OpenAI-совместимый API.
+    3. Вызывает DeepSeek deepseek-chat через OpenAI-совместимый API.
     4. Проверяет длину и наличие URL — предупреждает, но не блокирует.
     5. Возвращает WriterResult для передачи в Formatter.
 
-Примечание: OpenAI и Anthropic заблокированы по гео на VPS (RU).
-Perplexity API доступен глобально.
+Примечание: DeepSeek доступен глобально (в т.ч. с RU VPS).
 
-Стоимость: ~$0.003/день (sonar-pro, ~800 токенов/пост).
+Стоимость: ~$0.001/день (deepseek-chat, ~800 токенов/пост).
 """
 
 import logging
@@ -40,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-# Perplexity sonar-pro — хорошее качество текста, не требует VPN
-WRITER_MODEL   = "sonar-pro"
+# DeepSeek deepseek-chat — высокое качество текста, доступен глобально
+WRITER_MODEL   = "deepseek-chat"
 MAX_TOKENS     = 600
 TEMPERATURE    = 0.7
 MIN_POST_CHARS = 300
@@ -119,16 +118,16 @@ def _build_user_prompt(
 # ── Основная логика ───────────────────────────────────────────────────────────
 
 @_retryable
-async def _call_perplexity(system_prompt: str, user_prompt: str) -> tuple[str, int, int]:
+async def _call_deepseek(system_prompt: str, user_prompt: str) -> tuple[str, int, int]:
     """
-    Вызывает Perplexity sonar-pro через OpenAI-совместимый API.
+    Вызывает DeepSeek deepseek-chat через OpenAI-совместимый API.
 
     Returns:
         (текст, input_tokens, output_tokens)
     """
     client = openai.AsyncOpenAI(
-        api_key=settings.PERPLEXITY_API_KEY,
-        base_url="https://api.perplexity.ai",
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com",
     )
     response = await client.chat.completions.create(
         model=WRITER_MODEL,
@@ -168,9 +167,9 @@ async def write_post(
     user_prompt   = _build_user_prompt(article, verification)
 
     try:
-        post_text, in_tok, out_tok = await _call_perplexity(system_prompt, user_prompt)
+        post_text, in_tok, out_tok = await _call_deepseek(system_prompt, user_prompt)
     except Exception as exc:
-        logger.error(f"[writer] Ошибка Perplexity API: {exc}")
+        logger.error(f"[writer] Ошибка DeepSeek API: {exc}")
         raise
 
     latency    = int((time.monotonic() - t0) * 1000)

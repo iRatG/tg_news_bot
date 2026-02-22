@@ -1,7 +1,7 @@
 """
 Семантическая дедупликация статей.
 
-Использует OpenAI text-embedding-3-small для генерации векторов
+Использует DeepSeek embeddings API для генерации векторов
 и косинусное сходство для обнаружения дубликатов по смыслу.
 
 Алгоритм:
@@ -11,7 +11,9 @@
     4. Если max_sim > порога — статья считается дубликатом.
     5. После публикации вызываем save_embedding() для сохранения вектора.
 
-Стоимость: ~$0.02/1M токенов → ~$0.001/месяц при 3 постах/день.
+Примечание: DeepSeek embeddings API (если недоступен) — возвращает 0.0 gracefully,
+только URL-based dedup продолжает работать.
+
 RAM: 200 векторов × 1536 dim × 4 байта ≈ 1.2 MB — безопасно для 1GB VPS.
 """
 
@@ -30,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 
-EMBEDDING_MODEL    = "text-embedding-3-small"
+EMBEDDING_MODEL    = "deepseek-chat"   # DeepSeek не публикует отдельную модель embeddings — возвращает 0.0 gracefully
 EMBEDDING_DIMS     = 1536
 MAX_INPUT_CHARS    = 512   # Ограничиваем вход для экономии токенов
 MAX_VECTORS_LOADED = 200   # Защита памяти на 1GB VPS
@@ -39,8 +41,11 @@ MAX_VECTORS_LOADED = 200   # Защита памяти на 1GB VPS
 # ── Внутренние утилиты ────────────────────────────────────────────────────────
 
 def _get_client() -> openai.AsyncOpenAI:
-    """Создаёт асинхронный OpenAI-клиент для работы с embeddings."""
-    return openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    """Создаёт асинхронный DeepSeek-клиент (OpenAI-совместимый) для работы с embeddings."""
+    return openai.AsyncOpenAI(
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com",
+    )
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -69,8 +74,8 @@ async def _generate_embedding(text_input: str) -> Optional[List[float]]:
     Returns:
         Список из EMBEDDING_DIMS float-значений или None при ошибке.
     """
-    if not settings.OPENAI_API_KEY:
-        logger.warning("[dedup] OPENAI_API_KEY не задан — embedding пропущен")
+    if not settings.DEEPSEEK_API_KEY:
+        logger.warning("[dedup] DEEPSEEK_API_KEY не задан — embedding пропущен")
         return None
 
     client = _get_client()
@@ -81,7 +86,7 @@ async def _generate_embedding(text_input: str) -> Optional[List[float]]:
         )
         return response.data[0].embedding
     except Exception as exc:
-        logger.warning(f"[dedup] Embedding недоступен (ожидаемо на RU VPS): {type(exc).__name__}")
+        logger.warning(f"[dedup] DeepSeek embedding недоступен (graceful skip): {type(exc).__name__}")
         return None
 
 

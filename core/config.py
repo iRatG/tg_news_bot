@@ -10,11 +10,8 @@ class Settings:
     TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "@workhardatassp")
     TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
-    # OpenAI (GPT-4o-mini + embeddings)
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-
-    # Anthropic / Claude (available for future use)
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # DeepSeek (chat completions + embeddings)
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
 
     # Perplexity Sonar (fact-checking)
     PERPLEXITY_API_KEY: str = os.getenv("PERPLEXITY_API_KEY", "")
