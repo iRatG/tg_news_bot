@@ -168,14 +168,14 @@ function renderFunnel(data) {
 
 // ── 2. Top sources (horizontal bar) ──────────────────────────────────────────
 function renderSources(data) {
-    const sorted = [...data].sort((a, b) => b.count - a.count).slice(0, 8);
+    const sorted = [...data].sort((a, b) => b.published_count - a.published_count).slice(0, 8);
     if (charts.sources) charts.sources.destroy();
     charts.sources = new Chart(document.getElementById('chartSources'), {
         type: 'bar',
         data: {
             labels: sorted.map(s => s.name),
             datasets: [{
-                data:            sorted.map(s => s.count),
+                data:            sorted.map(s => s.published_count),
                 backgroundColor: C.accent,
                 borderRadius:    4,
                 barThickness:    18,
@@ -306,10 +306,11 @@ function renderPosts(posts) {
         return;
     }
     tbody.innerHTML = posts.map((p, i) => {
-        const preview = p.post_text ? p.post_text.replace(/<[^>]*>/g, '').slice(0, 80) + '…' : '—';
+        const preview = p.preview ? p.preview.replace(/<[^>]*>/g, '').slice(0, 80) + '…' : '—';
         const date    = p.published_at ? p.published_at.slice(0, 16).replace('T', ' ') : '—';
+        const channel = (p.channel_id ?? 'workhardatassp').replace('@', '');
         const tgLink  = p.telegram_msg_id
-            ? `<a href="https://t.me/${p.channel_id.replace('@','')}/${p.telegram_msg_id}"
+            ? `<a href="https://t.me/${channel}/${p.telegram_msg_id}"
                   target="_blank" style="color:var(--accent)">#${p.telegram_msg_id}</a>`
             : '—';
         return `<tr>
@@ -337,7 +338,7 @@ function updateStats(funnel, costs, sourcesData) {
 // ── Load all data in parallel ─────────────────────────────────────────────────
 async function loadDashboard() {
     try {
-        const [funnel, sources, timeline, costs, posts] = await Promise.all([
+        const [funnelRaw, sources, timelineRaw, costsRaw, posts] = await Promise.all([
             fetch('/api/dashboard/funnel').then(r => r.json()),
             fetch('/api/dashboard/sources').then(r => r.json()),
             fetch('/api/dashboard/timeline').then(r => r.json()),
@@ -345,12 +346,49 @@ async function loadDashboard() {
             fetch('/api/dashboard/recent_posts').then(r => r.json()),
         ]);
 
+        // Трансформация воронки: массив агентов → плоский объект для renderFunnel
+        const agentMap = {};
+        for (const a of funnelRaw) agentMap[a.agent] = a;
+        const funnel = {
+            found:      agentMap.researcher?.ok    ?? 0,
+            verified:   agentMap.fact_checker?.ok  ?? 0,
+            written:    agentMap.writer?.ok        ?? 0,
+            formatted:  agentMap.formatter?.ok     ?? 0,
+            published:  agentMap.analyst?.ok       ?? 0,
+            total_runs: agentMap.analyst?.total    ?? agentMap.researcher?.total ?? 0,
+        };
+
+        // Трансформация временной шкалы: массив строк → {labels, values}
+        const timeline = {
+            labels: timelineRaw.map(r => r.day        ?? ''),
+            values: timelineRaw.map(r => r.published   ?? 0),
+        };
+
+        // Трансформация токенов: массив строк → {labels, fact_checker, writer, formatter}
+        const daySet = [...new Set(costsRaw.map(r => r.day))].sort();
+        const agentTok = (agent) => daySet.map(d => {
+            const row = costsRaw.find(r => r.day === d && r.agent === agent);
+            return row ? (row.input_tokens + row.output_tokens) : 0;
+        });
+        const totalTokens = costsRaw.reduce(
+            (s, r) => s + (r.input_tokens ?? 0) + (r.output_tokens ?? 0), 0
+        );
+        const costs = {
+            total_usd:   totalTokens * 0.000001,
+            token_usage: {
+                labels:       daySet,
+                fact_checker: agentTok('fact_checker'),
+                writer:       agentTok('writer'),
+                formatter:    agentTok('formatter'),
+            },
+        };
+
         updateStats(funnel, costs, sources);
         renderFunnel(funnel);
         renderSources(sources);
-        renderReject(funnel.rejection_reasons ?? { labels: [], counts: [] });
+        renderReject({ labels: [], counts: [] });
         renderTimeline(timeline);
-        renderTokens(costs?.token_usage);
+        renderTokens(costs.token_usage);
         renderPosts(posts);
     } catch (err) {
         console.error('Dashboard load error:', err);

@@ -173,6 +173,7 @@ async def recent_posts(_=Depends(verify_credentials)):
                 pp.source_name,
                 pp.telegram_msg_id,
                 pp.has_image,
+                pp.channel_id,
                 SUBSTR(pp.post_text, 1, 120) AS preview
             FROM published_posts pp
             ORDER BY pp.published_at DESC
@@ -186,7 +187,8 @@ async def recent_posts(_=Depends(verify_credentials)):
             "source_name":     r[2],
             "telegram_msg_id": r[3],
             "has_image":       bool(r[4]),
-            "preview":         r[5],
+            "channel_id":      r[5],
+            "preview":         r[6],
         }
         for r in rows
     ]
