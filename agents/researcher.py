@@ -11,6 +11,8 @@
     3. Вычисляет score каждой статьи: ключевые слова + бонус за свежесть.
     4. Пакетно сохраняет новые статьи через INSERT OR IGNORE (батчи по 100).
     5. Возвращает топ-5 кандидатов с score >= 15.
+       Пул ограничен статьями за последние 7 дней (fetched_at).
+       fetched_at используется как proxy published_at для бонуса свежести.
 
 Стоимость: $0.00 (без API-вызовов).
 """
@@ -266,23 +268,27 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
     if new_articles:
         await _bulk_insert(new_articles)
 
-    # 5. Загружаем ВСЕ статьи со статусом 'new' из БД как пул для скоринга
-    #    (JOIN с sources даёт нужные метаданные для кандидата)
+    # 5. Загружаем статьи со статусом 'new' за последние 7 дней как пул для скоринга.
+    #    Фильтр по fetched_at отсекает зависшие старые статьи, которые никогда
+    #    не пройдут скоринг без бонуса за свежесть.
+    #    fetched_at включён в SELECT — используется как proxy published_at.
     async with async_session_factory() as session:
         pool_rows = (await session.execute(
             text("""
                 SELECT ra.id, ra.title, ra.url, ra.content,
-                       s.name, s.url, s.category
+                       s.name, s.url, s.category, ra.fetched_at
                 FROM raw_articles ra
                 JOIN sources s ON ra.source_id = s.id
                 WHERE ra.status = :status
+                  AND ra.fetched_at > datetime('now', '-7 days')
                 ORDER BY ra.fetched_at DESC
                 LIMIT 200
             """),
             {"status": ArticleStatus.NEW},
         )).fetchall()
 
-    # Строим быстрый индекс published_at по url из свежепарсенных
+    # Индекс RSS-дат по url (есть только для свежепарсенных в этом прогоне).
+    # Для остальных статей пула используем fetched_at из БД как proxy.
     pub_index: Dict[str, Optional[datetime]] = {
         a["url"]: a["published_at"] for a in all_raw
     }
@@ -290,9 +296,10 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
     # 6. Скоринг
     scored: List[RawArticleCandidate] = []
     for row in pool_rows:
-        db_id, title, url, content, src_name, src_url, category = row
+        db_id, title, url, content, src_name, src_url, category, fetched_at = row
         content = content or ""
-        pub = pub_index.get(url)
+        # Предпочитаем RSS-дату публикации; при её отсутствии — дата загрузки в БД
+        pub = pub_index.get(url) or fetched_at
 
         score = _compute_score(title, content, pub)
         if score >= MIN_SCORE:
@@ -303,7 +310,7 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
                 content=content[:3000],
                 source_name=src_name,
                 source_url=src_url,
-                published_at=pub or datetime.now(timezone.utc),
+                published_at=pub if pub is not None else datetime.now(timezone.utc),
                 score=score,
                 category=category,
             ))
