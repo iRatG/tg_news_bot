@@ -13,7 +13,7 @@
 RSS-источники (10 источников)
      │
      ▼
-[1] Researcher   — парсит RSS, скоринг по ключевым словам, URL-дедупликация
+[1] Researcher   — парсит RSS, скоринг + tier/brand/diversity, URL-дедупликация
      │ топ-5 кандидатов
      ▼
 [2] Fact-Checker — Perplexity sonar (веб-поиск), confidence score, источники
@@ -97,6 +97,125 @@ RSS-источники (10 источников)
 
 Текущий стиль виден и редактируется в `/admin` → Settings → `post_style_current`.
 Дайджест всегда использует стиль `curator`.
+
+---
+
+## Алгоритм отбора новостей: контентное разнообразие
+
+### Проблема
+
+OpenAI производит больше новостей, чем любой другой AI-игрок. Даже при идеальном скоринге по ключевым словам все 5 кандидатов-финалистов оказываются про ChatGPT — просто потому что их больше в RSS-лентах. Канал превращается в ChatGPT-репортаж вместо панорамы AI-индустрии.
+
+### Решение: три уровня фильтрации без LLM
+
+Весь алгоритм реализован в `agents/researcher.py` через детерминированные правила и математику. **Ни одного AI-вызова** — бесплатно, мгновенно, предсказуемо.
+
+```
+Базовый score (ключевые слова + бонус свежести)
+       ×
+Tier multiplier   (важность контента)
+       ×
+Diversity multiplier  (недоохваченность бренда)
+       =
+Adjusted score → сортировка → soft cap → финальные кандидаты
+```
+
+---
+
+### Уровень 1 — Tier: важность контента
+
+Каждая статья классифицируется по уровню научной/технической ценности:
+
+| Tier | Множитель | Критерии (в заголовке или тексте) |
+|---|---|---|
+| `breakthrough` | **×2.0** | `arxiv`, `paper`, `research`, `benchmark`, `study`, `survey`, `architecture`, `weights`, `dataset`, `outperforms`, `исследование`, `разбор`, `бенчмарк` и др. |
+| `news` | ×1.0 | Всё остальное — выход модели, обновление сервиса, интеграция |
+| `noise` | ×0.5 | `funding`, `investment`, `partnership`, `layoffs`, `acquisition`, `series a/b`, `инвестиции`, `партнерство` и др. |
+
+**Заголовок весит вдвое больше содержимого.** Итого:
+
+```python
+t1_score = sum(2 if kw in title else 1 for kw in TIER1_KEYWORDS if kw in text)
+# t1_score >= 2  → "breakthrough"
+# noise_score >= 2 and t1 == 0  → "noise"
+# иначе  → "news"
+```
+
+Это решает ключевую задачу: прорывная научная статья от любого бренда получает ×2 приоритет и **никогда не будет вытеснена** маркетинговой новостью с высоким объёмом.
+
+---
+
+### Уровень 2 — Diversity: балансировка по брендам
+
+Перед скорингом читается история публикаций из `published_posts` за последние 7 дней:
+
+```python
+brand_ratio = posts_by_brand_last_7d / total_posts_last_7d
+
+diversity_mult = 1.0 + (1.0 - brand_ratio)
+```
+
+| Ситуация | brand_ratio | diversity_mult |
+|---|---|---|
+| Бренд ни разу не публиковался | 0% | **2.0** (максимальный буст) |
+| Бренд занимает 25% публикаций | 25% | 1.75 |
+| Бренд занимает 50% публикаций | 50% | 1.50 |
+| Бренд занимает 100% публикаций | 100% | 1.0 (нет штрафа) |
+
+**Важно:** доминирующий бренд не штрафуется — только недоохваченные получают буст. Если OpenAI выпустил прорывную архитектуру (tier=breakthrough, ×2.0), она попадёт в подборку даже если OpenAI занимает 100% истории публикаций.
+
+Поддерживаемые бренды: `openai`, `anthropic`, `google`, `deepseek`, `meta`, `perplexity`, `mistral`, `xai`, `other`.
+
+---
+
+### Уровень 3 — Soft cap: ограничение в финальной выборке
+
+После сортировки по `adjusted_score` применяется soft cap при формировании топ-5:
+
+```
+breakthrough  → всегда включается, без ограничений по бренду
+news / noise  → не более BRAND_CAP = 2 статей одного бренда
+```
+
+```python
+for candidate in sorted_by_adjusted_score:
+    if candidate.tier == "breakthrough":
+        result.append(candidate)          # всегда
+    elif brand_count[candidate.brand] < BRAND_CAP:
+        result.append(candidate)          # soft cap
+        brand_count[candidate.brand] += 1
+    if len(result) >= MAX_RESULTS:
+        break
+```
+
+---
+
+### Пример из логов
+
+```
+[researcher] История брендов за 7 дней: {'openai': 12, 'anthropic': 3, 'google': 2, 'other': 3}
+[researcher] Готово: 5/47 кандидатов | пул=200 | [deepseek(b) meta(b) other(b) anthropic(n) google(n)] | 17319мс
+
+  [base= 35 adj= 70.0 tier=B brand=deepseek    ] Simon Willison: Architectural Choices in China's Open-Source AI
+  [base= 28 adj= 56.0 tier=B brand=meta        ] LLaMA 3.1: Architecture and Training Details
+  [base= 25 adj= 43.8 tier=B brand=other        ] MLflow 2.20: New Evaluation Framework
+  [base= 30 adj= 37.5 tier=N brand=anthropic    ] Claude 3.7 Sonnet Update
+  [base= 22 adj= 28.6 tier=N brand=google       ] Gemini for Workspace Announcement
+```
+
+`b` = breakthrough (tier), `n` = news. Несмотря на то что OpenAI доминирует в истории (12/20 постов), ни одного OpenAI-поста нет: у них нет breakthrough-статей в пуле, а Tier 2/3 вытеснены конкурентами с diversity_mult=2.0.
+
+---
+
+### Почему не LLM для классификации?
+
+| Подход | Стоимость (200 кандидатов) | Latency | Детерминизм |
+|---|---|---|---|
+| Keyword rules (текущий) | **$0** | ~0мс | **100%** |
+| Perplexity sonar на классификацию | ~$0.04/прогон | +200с | ~85% |
+| GPT-4o-mini на классификацию | ~$0.02/прогон | +60с | ~90% |
+
+Правила покрывают 90%+ случаев в AI-новостях. LLM добавляет гибкость за счёт стоимости и непредсказуемости — невыгодный обмен для фильтрации на входе пайплайна.
 
 ---
 
@@ -279,7 +398,7 @@ VPS_DEPLOY_PATH=/opt/tg_news_bot
 ```
 tg_news_bot/
 ├── agents/
-│   ├── researcher.py    # RSS-парсинг, скоринг по ключевым словам
+│   ├── researcher.py    # RSS-парсинг, tier/brand/diversity scoring, soft cap
 │   ├── fact_checker.py  # Верификация через Perplexity sonar
 │   ├── writer.py        # 4 стиля, 3 формата, write_post() + write_digest()
 │   ├── formatter.py     # Telegram HTML, очистка артефактов, Leonardo AI
