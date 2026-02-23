@@ -25,16 +25,19 @@ from db.models import Base, Source, Setting, ScheduleSlot
 # ── Seed data ─────────────────────────────────────────────────────────────────
 
 RSS_SEEDS = [
-    {"name": "OpenAI Blog",          "url": "https://openai.com/blog/rss.xml",              "category": "ai_models"},
-    {"name": "Anthropic",            "url": "https://www.anthropic.com/rss.xml",             "category": "ai_models"},
-    {"name": "Google DeepMind",      "url": "https://deepmind.google/blog/rss",              "category": "ai_models"},
+    # Google Alerts RSS — заменяют прямые фиды, которые падают по SSL-timeout на RU VPS
+    {"name": "OpenAI Blog",          "url": "https://www.google.com/alerts/feeds/12411355382602761870/7532254929191633487",   "category": "ai_models"},
+    {"name": "Anthropic",            "url": "https://www.google.com/alerts/feeds/12411355382602761870/11509297532728669995",  "category": "ai_models"},
+    {"name": "Google DeepMind",      "url": "https://www.google.com/alerts/feeds/12411355382602761870/13699734839237282988",  "category": "ai_models"},
+    {"name": "DeepSeek",             "url": "https://www.google.com/alerts/feeds/12411355382602761870/1744048258622321637",   "category": "ai_models"},
+    {"name": "ArXiv cs.AI",          "url": "https://www.google.com/alerts/feeds/12411355382602761870/7048638059286736929",   "category": "research"},
+    {"name": "The Batch",            "url": "https://www.google.com/alerts/feeds/12411355382602761870/9850731068664068129",   "category": "ai_news"},
+    # Прямые фиды (стабильны на RU VPS)
     {"name": "HuggingFace Blog",     "url": "https://huggingface.co/blog/feed.xml",          "category": "ai_models"},
-    {"name": "Simon Willison",       "url": "https://simonwillison.net/atom/entries/",       "category": "vibe_coding"},
-    {"name": "Latent Space",         "url": "https://www.latent.space/feed",                 "category": "vibe_coding"},
-    {"name": "TLDR AI",              "url": "https://tldr.tech/ai/rss",                     "category": "ai_news"},
-    {"name": "Towards Data Science", "url": "https://towardsdatascience.com/feed",           "category": "data_eng"},
-    {"name": "ArXiv cs.AI",          "url": "https://rss.arxiv.org/rss/cs.AI",              "category": "research"},
-    {"name": "The Batch",            "url": "https://www.deeplearning.ai/the-batch/feed",    "category": "ai_news"},
+    {"name": "Simon Willison",       "url": "https://simonwillison.net/atom/entries/",        "category": "vibe_coding"},
+    {"name": "Latent Space",         "url": "https://www.latent.space/feed",                  "category": "vibe_coding"},
+    {"name": "TLDR AI",              "url": "https://tldr.tech/ai/rss",                      "category": "ai_news"},
+    {"name": "Towards Data Science", "url": "https://towardsdatascience.com/feed",            "category": "data_eng"},
 ]
 
 WRITER_SYSTEM_PROMPT = """Ты — senior data engineer и AI practitioner с 10 годами опыта.

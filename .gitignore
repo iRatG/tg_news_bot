@@ -3,6 +3,10 @@
 keys.txt
 human_review_task_business.md
 technical_review.md
+sample_post.txt
+test_quality_output.txt
+tmp_db_query.py
+vps_logs.txt
 
 # Database
 data/
