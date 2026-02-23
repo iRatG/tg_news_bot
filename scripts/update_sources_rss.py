@@ -4,7 +4,9 @@
 Используется для обновления уже существующей БД на VPS (init_db.py не меняет
 существующие записи, а лишь добавляет новые по URL).
 
-Безопасно запускать многократно (идемпотентно).
+Если init_db.py уже добавил Google Alerts записи как новые строки, скрипт удаляет
+старые дублирующие записи по имени. Безопасно запускать многократно (идемпотентно).
+
 Usage: python scripts/update_sources_rss.py
 """
 
@@ -23,7 +25,7 @@ load_dotenv()
 from sqlalchemy import text
 from db.database import async_session_factory
 
-# Маппинг: имя источника → новый URL (Google Alerts RSS)
+# Маппинг: имя источника → целевой URL (Google Alerts RSS)
 URL_UPDATES = {
     "OpenAI Blog":     "https://www.google.com/alerts/feeds/12411355382602761870/7532254929191633487",
     "Anthropic":       "https://www.google.com/alerts/feeds/12411355382602761870/11509297532728669995",
@@ -44,29 +46,58 @@ async def migrate():
     print("=== Миграция RSS-источников ===\n")
 
     async with async_session_factory() as session:
+        changes = 0
 
-        # 1. UPDATE существующих источников
-        updated = 0
-        for name, new_url in URL_UPDATES.items():
+        for name, target_url in URL_UPDATES.items():
+            # Ищем все записи с этим именем
             result = await session.execute(
-                text("SELECT id, url FROM sources WHERE name = :name"),
+                text("SELECT id, url FROM sources WHERE name = :name ORDER BY id"),
                 {"name": name},
             )
-            row = result.fetchone()
-            if row is None:
+            rows = result.fetchall()
+
+            if not rows:
                 print(f"  [skip]    '{name}' — источник не найден в БД")
                 continue
-            if row[1] == new_url:
-                print(f"  [ok]      '{name}' — URL уже актуален")
-                continue
-            await session.execute(
-                text("UPDATE sources SET url = :url WHERE name = :name"),
-                {"url": new_url, "name": name},
-            )
-            print(f"  [updated] '{name}' → {new_url[:60]}...")
-            updated += 1
 
-        # 2. INSERT DeepSeek (если ещё нет)
+            # Находим записи с правильным URL и устаревшим URL
+            correct = [r for r in rows if r[1] == target_url]
+            stale   = [r for r in rows if r[1] != target_url]
+
+            if correct and not stale:
+                # Всё уже в порядке
+                print(f"  [ok]      '{name}' — URL актуален")
+                continue
+
+            if correct and stale:
+                # init_db.py уже добавил новую запись — удаляем старые дубликаты
+                for row in stale:
+                    await session.execute(
+                        text("DELETE FROM sources WHERE id = :id"),
+                        {"id": row[0]},
+                    )
+                    print(f"  [dedup]   '{name}' — удалён старый дубликат (id={row[0]}, url={row[1][:55]}...)")
+                    changes += 1
+                continue
+
+            if not correct and stale:
+                # Только старые записи — обновляем первую, остальные удаляем
+                first_id = stale[0][0]
+                await session.execute(
+                    text("UPDATE sources SET url = :url WHERE id = :id"),
+                    {"url": target_url, "id": first_id},
+                )
+                print(f"  [updated] '{name}' id={first_id} → {target_url[:55]}...")
+                changes += 1
+                for row in stale[1:]:
+                    await session.execute(
+                        text("DELETE FROM sources WHERE id = :id"),
+                        {"id": row[0]},
+                    )
+                    print(f"  [dedup]   '{name}' — удалён лишний дубликат (id={row[0]})")
+                    changes += 1
+
+        # INSERT DeepSeek (если ещё нет — ни по имени, ни по URL)
         result = await session.execute(
             text("SELECT id FROM sources WHERE name = :name OR url = :url"),
             {"name": NEW_SOURCE["name"], "url": NEW_SOURCE["url"]},
@@ -81,12 +112,12 @@ async def migrate():
                 ),
                 NEW_SOURCE,
             )
-            print(f"  [added]   '{NEW_SOURCE['name']}' → {NEW_SOURCE['url'][:60]}...")
-            updated += 1
+            print(f"  [added]   '{NEW_SOURCE['name']}' → {NEW_SOURCE['url'][:55]}...")
+            changes += 1
 
         await session.commit()
 
-    print(f"\nГотово: {updated} изменений применено.")
+    print(f"\nГотово: {changes} изменений применено.")
 
 
 if __name__ == "__main__":
