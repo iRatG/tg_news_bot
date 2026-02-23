@@ -57,11 +57,12 @@ SCORE_WEIGHTS: Dict[str, int] = {**_HIGH_VALUE, **_MEDIUM_VALUE, **_LOW_VALUE}
 # Бонус за свежесть: (порог в часах, баллы)
 RECENCY_BONUSES = [(24, 20), (48, 10), (168, 5)]
 
-MIN_SCORE    = 15   # Минимальный порог попадания в кандидаты
-MAX_RESULTS  = 5    # Максимум кандидатов на выходе
-FETCH_WORKERS = 5   # Потоков для параллельного парсинга
-INSERT_BATCH  = 100 # Размер батча INSERT (обход лимита SQLite в 999 переменных)
-BRAND_CAP    = 2    # Макс. Tier 2/3 статей одного бренда в финальной выборке
+MIN_SCORE          = 15  # Минимальный порог попадания в кандидаты
+FALLBACK_MIN_SCORE = 6   # Fallback порог: когда пул старый, нет бонуса свежести
+MAX_RESULTS        = 5   # Максимум кандидатов на выходе
+FETCH_WORKERS      = 5   # Потоков для параллельного парсинга
+INSERT_BATCH       = 100 # Размер батча INSERT (обход лимита SQLite в 999 переменных)
+BRAND_CAP          = 2   # Макс. Tier 2/3 статей одного бренда в финальной выборке
 
 
 # ── Детекция AI-бренда ────────────────────────────────────────────────────────
@@ -490,6 +491,50 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
                 tier=tier,
                 adjusted_score=adjusted_score,
             ))
+
+    # Fallback: если MIN_SCORE дал 0 кандидатов — снижаем порог до FALLBACK_MIN_SCORE.
+    # Причина: пул состоит из старых статей (> 48ч) без бонуса свежести,
+    # которые не набирают 15 только по ключевым словам.
+    # Типичная ситуация: RSS вернул архивные посты (2017-2018) или нет новых лент.
+    if not scored and pool_rows:
+        logger.warning(
+            f"[researcher] MIN_SCORE={MIN_SCORE} → 0 кандидатов. "
+            f"Fallback: порог {FALLBACK_MIN_SCORE} (старый пул без бонуса свежести)."
+        )
+        for row in pool_rows:
+            db_id, title, url, content, src_name, src_url, category, fetched_at_raw = row
+            content = content or ""
+            if isinstance(fetched_at_raw, str):
+                try:
+                    fetched_at_dt = datetime.strptime(
+                        fetched_at_raw[:19], "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    fetched_at_dt = datetime.now(timezone.utc)
+            elif fetched_at_raw is None:
+                fetched_at_dt = datetime.now(timezone.utc)
+            else:
+                fetched_at_dt = fetched_at_raw
+                if fetched_at_dt.tzinfo is None:
+                    fetched_at_dt = fetched_at_dt.replace(tzinfo=timezone.utc)
+
+            base_score = _compute_score(title, content, fetched_at_dt)
+            if base_score < FALLBACK_MIN_SCORE:
+                continue
+            brand = _detect_brand(title, content, url)
+            tier  = _detect_tier(title, content)
+            adjusted_score = (
+                base_score * _TIER_MULT[tier]
+                * _compute_diversity_mult(brand, brand_history)
+            )
+            scored.append(RawArticleCandidate(
+                db_id=db_id, title=title, url=url,
+                content=content[:3000], source_name=src_name, source_url=src_url,
+                published_at=pub_index.get(url) or fetched_at_dt,
+                score=base_score, category=category, brand=brand, tier=tier,
+                adjusted_score=adjusted_score,
+            ))
+        logger.warning(f"[researcher] Fallback дал {len(scored)} кандидатов.")
 
     scored.sort(key=lambda c: c.adjusted_score, reverse=True)
 

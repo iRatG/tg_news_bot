@@ -152,6 +152,15 @@ _UNSUPPORTED_TAGS = re.compile(
     re.IGNORECASE,
 )
 
+# Whitelist разрешённых Telegram HTML-тегов.
+# Всё остальное вида <...> является невалидным и вызывает ошибку Telegram Bot API.
+_VALID_TG_TAG = re.compile(
+    r'^</?(?:b|i|u|s|code|pre|strong|em|del|strike|tg-spoiler)>$'
+    r'|^<a(?:\s[^>]*)?>$'
+    r'|^</a>$',
+    re.IGNORECASE,
+)
+
 
 def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     """
@@ -161,7 +170,8 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     <strong>, <em>, <del>, <strike>, <tg-spoiler>.
 
     - <br> → \\n (Telegram не поддерживает <br>)
-    - Удаляет прочие неподдерживаемые теги (p, div, span, h1-h6 и др.)
+    - Удаляет известные структурные теги (p, div, span, h1-h6 и др.)
+    - Catch-all: удаляет любые <tag> не из whitelist (в т.ч. <20%>, <exploit> и т.д.)
     - Незакрытый <b> → добавляет </b>
     - Текст длиннее max_chars → жёсткая обрезка до последнего пробела
     """
@@ -171,11 +181,22 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     # <br> → перенос строки
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
 
-    # Удаляем неподдерживаемые теги
+    # Удаляем известные неподдерживаемые структурные теги
     cleaned = _UNSUPPORTED_TAGS.sub('', text)
     if cleaned != text:
         logger.warning("[formatter] Удалены неподдерживаемые HTML-теги")
     text = cleaned
+
+    # Catch-all: удаляем любые оставшиеся <...> не из whitelist Telegram.
+    # Защита от конструкций вроде <20%>, <500ms>, <exploit>, <уязвимость> и т.д.,
+    # которые Telegram пытается распарсить как HTML и возвращает ошибку.
+    def _drop_invalid(m: re.Match) -> str:
+        return m.group(0) if _VALID_TG_TAG.match(m.group(0)) else ''
+
+    catch_cleaned = re.sub(r'<[^>]{0,200}>', _drop_invalid, text, flags=re.IGNORECASE)
+    if catch_cleaned != text:
+        logger.warning("[formatter] Catch-all: удалены нераспознанные HTML-конструкции")
+    text = catch_cleaned
 
     # Баланс тега <b>
     if text.count("<b>") != text.count("</b>"):
