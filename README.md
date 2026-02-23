@@ -10,7 +10,7 @@
 ## Пайплайн (5 агентов)
 
 ```
-RSS-источники (10 источников)
+RSS-источники (11 источников)
      │
      ▼
 [1] Researcher   — парсит RSS, скоринг + tier/brand/diversity, URL-дедупликация
@@ -284,7 +284,7 @@ docker run -d --name newsbot \
 python scripts/deploy_vps.py
 ```
 
-Скрипт: `git pull → docker build → init_db → docker stop/rm → docker run → health check`.
+Скрипт: `git pull → docker build → init_db → migrate_sources → docker stop/rm → docker run → health check`.
 
 ---
 
@@ -419,9 +419,10 @@ tg_news_bot/
 │   ├── base.html        # Dark-theme layout
 │   └── dashboard.html   # Chart.js дашборд
 ├── scripts/
-│   ├── init_db.py       # Инициализация БД и seed-данных
-│   ├── healthcheck.py   # Pre-deploy проверки (токен, DB)
-│   └── deploy_vps.py    # Автодеплой через paramiko SSH
+│   ├── init_db.py            # Инициализация БД и seed-данных (idempotent)
+│   ├── update_sources_rss.py # Миграция RSS URL в существующей БД (idempotent)
+│   ├── healthcheck.py        # Pre-deploy проверки (токен, DB)
+│   └── deploy_vps.py         # Автодеплой через paramiko SSH
 ├── Dockerfile
 ├── main.py              # Entrypoint: FastAPI + APScheduler
 └── requirements.txt
@@ -456,11 +457,31 @@ tg_news_bot/
 - Семантическая дедупликация (OpenAI embeddings) отключена, используется только URL-дедупликация
 
 ### RSS-источники
-Из 10 источников стабильно работают ~5–6. Проблемные:
-- Google DeepMind, Anthropic — malformed XML
-- TLDR AI, ArXiv, The Batch — SSL timeout
+
+11 источников в двух группах:
+
+**Google Alerts RSS** (надёжны на RU VPS, нет SSL-проблем):
+| Источник | Категория |
+|---|---|
+| OpenAI Blog | ai_models |
+| Anthropic | ai_models |
+| Google DeepMind | ai_models |
+| DeepSeek | ai_models |
+| ArXiv cs.AI | research |
+| The Batch (DeepLearning.AI) | ai_news |
+
+**Прямые фиды** (стабильно работают):
+| Источник | Категория |
+|---|---|
+| HuggingFace Blog | ai_models |
+| Simon Willison | vibe_coding |
+| Latent Space | vibe_coding |
+| TLDR AI | ai_news |
+| Towards Data Science | data_eng |
 
 `socket.setdefaulttimeout(10)` обязателен перед каждым `feedparser.parse()`.
+
+При добавлении новых источников в уже работающую БД используется `scripts/update_sources_rss.py` (идемпотентная миграция).
 
 ---
 
