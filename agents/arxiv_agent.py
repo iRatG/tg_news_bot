@@ -134,7 +134,12 @@ class ArxivAgent:
 
         def _sync_fetch() -> list[dict]:
             """Синхронный блок: запрос к arXiv API."""
+            import socket
             import arxiv  # импорт здесь — не в top-level, чтобы не ломать запуск без пакета
+
+            # Обязательный timeout для синхронных HTTP запросов (arxiv использует requests)
+            # Без этого requests может зависнуть навсегда на медленном соединении с RU VPS
+            socket.setdefaulttimeout(60)
 
             cutoff = datetime.now() - timedelta(days=ARXIV_DAYS_LOOKBACK)
             seen_ids: set[str] = set()
@@ -183,7 +188,14 @@ class ArxivAgent:
 
             return papers
 
-        all_papers = await loop.run_in_executor(None, _sync_fetch)
+        try:
+            all_papers = await asyncio.wait_for(
+                loop.run_in_executor(None, _sync_fetch),
+                timeout=180.0,  # 3 минуты максимум
+            )
+        except asyncio.TimeoutError:
+            logger.error("[arxiv_agent] Timeout при получении бумаг с arXiv (>180s) — пропускаем прогон")
+            return []
         logger.info(f"[arxiv_agent] Получено с API: {len(all_papers)} бумаг")
 
         if not all_papers:
