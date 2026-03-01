@@ -18,6 +18,7 @@
 В режиме дайджеста все верифицированные статьи помечаются как PUBLISHED.
 """
 
+import hashlib
 import logging
 import time
 from typing import List, Tuple
@@ -27,9 +28,9 @@ from sqlalchemy import text
 from agents import analyst, fact_checker, formatter, researcher, writer
 from agents.fact_checker import VerificationResult
 from agents.researcher import RawArticleCandidate
-from core.config import get_setting
+from core.config import get_setting, settings
 from core.logger import agent_logger
-from core.publisher import notify_admin
+from core.publisher import notify_admin, publish_post
 from db.database import async_session_factory
 from db.models import ArticleStatus, RunStatus
 
@@ -471,3 +472,258 @@ async def _run_digest(
             f"Кандидатов: {len(candidates)}, верифицировано: {verified_count}\n"
             f"Детали: /admin → Agent Logs"
         )
+
+
+# ── arXiv пайплайн ────────────────────────────────────────────────────────────
+
+async def run_arxiv_pipeline(run_id: int) -> None:
+    """
+    Отдельный пайплайн для публикации научных бумаг с arXiv.
+
+    Не использует стандартных агентов researcher/fact_checker/writer —
+    вся логика инкапсулирована в ArxivAgent.
+
+    Шаги:
+        1. Убеждаемся, что источник 'arXiv API' есть в sources
+        2. ArxivAgent.fetch_new_papers() — получаем новые бумаги
+        3. Для каждой бумаги (до arxiv_max_papers):
+           a. process_paper()  — суммаризация + форматирование
+           b. INSERT raw_articles (для связи с published_posts)
+           c. publish_post()   — публикация в Telegram
+           d. INSERT published_posts
+           e. INSERT arxiv_seen_papers (деduplication mark)
+        4. _finish_run() — статистика прогона
+
+    Args:
+        run_id: ID прогона в таблице pipeline_runs.
+    """
+    from agents.arxiv_agent import ArxivAgent
+    from agents.formatter import FormatterResult
+
+    t_start = time.monotonic()
+    logger.info(f"[pipeline] === ARXIV ПРОГОН #{run_id} НАЧАТ ===")
+
+    try:
+        max_papers = int(await get_setting("arxiv_max_papers", "2"))
+
+        # ── Шаг 1: Обеспечить наличие источника 'arXiv API' ──────────────────
+        async with async_session_factory() as session:
+            row = (await session.execute(
+                text("SELECT id FROM sources WHERE url = 'https://arxiv.org/api/'")
+            )).fetchone()
+
+            if row:
+                source_id = row[0]
+            else:
+                result = await session.execute(
+                    text("""
+                        INSERT INTO sources (name, url, category, is_active, fetch_count)
+                        VALUES ('arXiv API', 'https://arxiv.org/api/', 'research', 1, 0)
+                    """)
+                )
+                await session.commit()
+                source_id = result.lastrowid
+                logger.info(f"[pipeline] ARXIV: создан источник 'arXiv API' id={source_id}")
+
+        # ── Шаг 2: Получение новых бумаг ─────────────────────────────────────
+        t_fetch = time.monotonic()
+        agent = ArxivAgent()
+        papers = await agent.fetch_new_papers()
+        fetch_latency = int((time.monotonic() - t_fetch) * 1000)
+
+        await agent_logger.log_agent(
+            agent_name="arxiv_agent",
+            run_id=run_id,
+            article_id=None,
+            status="ok",
+            reason=f"Новых бумаг: {len(papers)}",
+            latency_ms=fetch_latency,
+        )
+
+        if not papers:
+            logger.info(f"[pipeline] ARXIV #{run_id}: нет новых бумаг")
+            await _finish_run(run_id, 0, 0, 0, RunStatus.COMPLETED_EMPTY)
+            return
+
+        published_count = 0
+        papers_to_process = papers[:max_papers]
+
+        # ── Шаг 3: Обработка и публикация каждой бумаги ──────────────────────
+        for paper in papers_to_process:
+            t_paper = time.monotonic()
+
+            # 3a. Суммаризация и форматирование
+            try:
+                post_html, in_tok, out_tok = await agent.process_paper(paper)
+            except Exception as exc:
+                latency = int((time.monotonic() - t_paper) * 1000)
+                await agent_logger.log_agent(
+                    "arxiv_agent", run_id, None,
+                    "error", reason=f"process_paper: {exc}", latency_ms=latency,
+                )
+                logger.error(
+                    f"[pipeline] ARXIV #{run_id}: ошибка обработки "
+                    f"{paper['arxiv_id']!r}: {exc}",
+                    exc_info=True,
+                )
+                continue
+
+            # 3b. INSERT raw_articles (для FK в published_posts)
+            title_md5 = hashlib.md5(paper["title"].encode()).hexdigest()
+            article_id: int = 0
+
+            async with async_session_factory() as session:
+                try:
+                    result = await session.execute(
+                        text("""
+                            INSERT OR IGNORE INTO raw_articles
+                                (source_id, title, url, content, title_md5, status, retry_count)
+                            VALUES
+                                (:source_id, :title, :url, :content, :title_md5, 'published', 0)
+                        """),
+                        {
+                            "source_id": source_id,
+                            "title":     paper["title"],
+                            "url":       paper["arxiv_url"],
+                            "content":   paper["abstract"][:3000],
+                            "title_md5": title_md5,
+                        },
+                    )
+                    await session.commit()
+
+                    if result.rowcount == 0:
+                        # Уже есть в raw_articles (например, из RSS) — пропускаем
+                        logger.warning(
+                            f"[pipeline] ARXIV: бумага {paper['arxiv_url']!r} "
+                            f"уже в raw_articles — пропускаем"
+                        )
+                        # Всё равно помечаем как виденную
+                        await session.execute(
+                            text("""
+                                INSERT OR IGNORE INTO arxiv_seen_papers (arxiv_id, title)
+                                VALUES (:arxiv_id, :title)
+                            """),
+                            {"arxiv_id": paper["arxiv_id"], "title": paper["title"]},
+                        )
+                        await session.commit()
+                        continue
+
+                    article_id = result.lastrowid
+                except Exception as exc:
+                    logger.error(
+                        f"[pipeline] ARXIV: ошибка INSERT raw_articles: {exc}",
+                        exc_info=True,
+                    )
+                    continue
+
+            # 3c. Публикация в Telegram
+            try:
+                fmt_result = FormatterResult(
+                    article_id=article_id,
+                    formatted_text=post_html,
+                    image_bytes=None,
+                    post_format="arxiv",
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    latency_ms=0,
+                )
+                msg_id = await publish_post(fmt_result)
+            except Exception as exc:
+                latency = int((time.monotonic() - t_paper) * 1000)
+                await agent_logger.log_agent(
+                    "arxiv_agent", run_id, article_id,
+                    "error", reason=f"publish_post: {exc}", latency_ms=latency,
+                )
+                logger.error(
+                    f"[pipeline] ARXIV #{run_id}: ошибка публикации: {exc}",
+                    exc_info=True,
+                )
+                continue
+
+            # 3d. INSERT published_posts
+            async with async_session_factory() as session:
+                await session.execute(
+                    text("""
+                        INSERT INTO published_posts
+                            (article_id, run_id, telegram_msg_id, channel_id,
+                             post_text, source_url, source_name, has_image)
+                        VALUES
+                            (:article_id, :run_id, :msg_id, :channel_id,
+                             :post_text, :source_url, 'arXiv', 0)
+                    """),
+                    {
+                        "article_id": article_id,
+                        "run_id":     run_id,
+                        "msg_id":     msg_id,
+                        "channel_id": settings.TELEGRAM_CHANNEL_ID,
+                        "post_text":  post_html,
+                        "source_url": paper["arxiv_url"],
+                    },
+                )
+                await session.commit()
+
+            # 3e. Пометить бумагу как виденную
+            async with async_session_factory() as session:
+                await session.execute(
+                    text("""
+                        INSERT OR IGNORE INTO arxiv_seen_papers (arxiv_id, title)
+                        VALUES (:arxiv_id, :title)
+                    """),
+                    {"arxiv_id": paper["arxiv_id"], "title": paper["title"]},
+                )
+                await session.commit()
+
+            latency = int((time.monotonic() - t_paper) * 1000)
+            await agent_logger.log_agent(
+                "arxiv_agent", run_id, article_id, "ok",
+                reason=f"arXiv:{paper['arxiv_id']} msg_id={msg_id}",
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                latency_ms=latency,
+            )
+            published_count += 1
+            logger.info(
+                f"[pipeline] ARXIV #{run_id}: ✓ Опубликовано "
+                f"{paper['arxiv_id']!r} msg_id={msg_id}"
+            )
+
+        # ── Финализация ───────────────────────────────────────────────────────
+        final_status = (
+            RunStatus.COMPLETED if published_count > 0
+            else RunStatus.COMPLETED_EMPTY
+        )
+        elapsed = int((time.monotonic() - t_start) * 1000)
+
+        await _finish_run(
+            run_id=run_id,
+            articles_found=len(papers),
+            articles_verified=len(papers_to_process),
+            articles_published=published_count,
+            status=final_status,
+        )
+
+        logger.info(
+            f"[pipeline] === ARXIV ПРОГОН #{run_id} ЗАВЕРШЁН: "
+            f"найдено={len(papers)} обработано={len(papers_to_process)} "
+            f"опубликовано={published_count} | {elapsed}мс ==="
+        )
+
+        if published_count == 0:
+            await notify_admin(
+                f"⚠️ arXiv прогон #{run_id}: 0 постов опубликовано\n"
+                f"Новых бумаг найдено: {len(papers)}\n"
+                f"Детали: /admin → Agent Logs"
+            )
+
+    except Exception as exc:
+        elapsed = int((time.monotonic() - t_start) * 1000)
+        logger.error(
+            f"[pipeline] ARXIV #{run_id}: СИСТЕМНАЯ ОШИБКА: {exc}",
+            exc_info=True,
+        )
+        await _finish_run(run_id, 0, 0, 0, RunStatus.FAILED, str(exc))
+        await notify_admin(
+            f"🔴 arXiv прогон #{run_id} УПАЛ с ошибкой:\n"
+            f"<code>{str(exc)[:300]}</code>"
+        )
+        raise

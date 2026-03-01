@@ -1,6 +1,9 @@
 # RSS parsing
 feedparser==6.0.11
 
+# arXiv API (для ArxivAgent — надёжнее RSS на VPS)
+arxiv>=2.1.0
+
 # HTTP clients
 httpx==0.27.0
 requests==2.31.0

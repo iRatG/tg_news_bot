@@ -219,3 +219,27 @@ async def manual_run(is_morning: bool = False, _=Depends(verify_credentials)):
 
     asyncio.create_task(_run())
     return {"run_id": run_id, "status": "started", "mode": mode}
+
+
+@app.post("/api/pipeline/run_arxiv")
+async def manual_arxiv_run(_=Depends(verify_credentials)):
+    """
+    Запускает arXiv пайплайн вручную (из дашборда или через API).
+
+    Публикует научные бумаги с arXiv.org как отдельный тип поста.
+    Запускает в фоне через asyncio.create_task.
+    Возвращает run_id немедленно.
+    """
+    import asyncio
+    from core.pipeline import create_pipeline_run, run_arxiv_pipeline
+
+    run_id = await create_pipeline_run()
+
+    async def _run():
+        try:
+            await run_arxiv_pipeline(run_id)
+        except Exception as exc:
+            logger.error(f"[dashboard] Ошибка ручного arXiv запуска: {exc}")
+
+    asyncio.create_task(_run())
+    return {"run_id": run_id, "status": "started", "mode": "arxiv"}

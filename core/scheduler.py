@@ -74,6 +74,22 @@ async def _run_pipeline_job() -> None:
         logger.error(f"[scheduler] Ошибка запланированного прогона: {exc}", exc_info=True)
 
 
+async def _run_arxiv_job() -> None:
+    """
+    Точка входа для APScheduler — запускает arXiv пайплайн.
+
+    Публикует научные бумаги с arXiv.org как отдельный тип поста.
+    """
+    from core.pipeline import create_pipeline_run, run_arxiv_pipeline
+
+    try:
+        run_id = await create_pipeline_run()
+        logger.info(f"[scheduler] Запуск arXiv прогона #{run_id}")
+        await run_arxiv_pipeline(run_id)
+    except Exception as exc:
+        logger.error(f"[scheduler] Ошибка arXiv прогона: {exc}", exc_info=True)
+
+
 # ── Управление расписанием ────────────────────────────────────────────────────
 
 async def reload_schedule() -> None:
@@ -124,6 +140,32 @@ async def reload_schedule() -> None:
         )
 
     logger.info(f"[scheduler] Расписание загружено: {len(rows)} активных слотов")
+
+    # ── arXiv задача ──────────────────────────────────────────────────────────
+    from core.config import get_setting
+
+    arxiv_enabled = (await get_setting("arxiv_schedule_enabled", "true")).lower() == "true"
+    arxiv_hour    = int(await get_setting("arxiv_schedule_hour", "18"))
+
+    # Удаляем старую arxiv задачу перед регистрацией новой
+    for job in scheduler.get_jobs():
+        if job.id == "arxiv_daily":
+            job.remove()
+
+    if arxiv_enabled:
+        scheduler.add_job(
+            func=_run_arxiv_job,
+            trigger="cron",
+            hour=arxiv_hour,
+            minute=0,
+            day_of_week="mon-sun",
+            id="arxiv_daily",
+            replace_existing=True,
+            name=f"arXiv {arxiv_hour:02d}:00 MSK",
+        )
+        logger.info(f"[scheduler] arXiv задача: ежедневно в {arxiv_hour:02d}:00 МСК")
+    else:
+        logger.info("[scheduler] arXiv задача отключена (arxiv_schedule_enabled=false)")
 
 
 async def start_scheduler() -> None:

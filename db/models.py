@@ -251,3 +251,18 @@ class PostStats(Base):
 
     def __repr__(self) -> str:
         return f"<PostStats(id={self.id}, post_id={self.post_id}, views={self.views})>"
+
+
+class ArxivSeenPaper(Base):
+    """Таблица для дедупликации бумаг arXiv (заменяет seen_papers.json)."""
+
+    __tablename__ = "arxiv_seen_papers"
+
+    arxiv_id: Mapped[str] = mapped_column(String, primary_key=True)  # "2502.12345"
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<ArxivSeenPaper(arxiv_id={self.arxiv_id!r})>"
