@@ -24,6 +24,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+import feedparser
+import httpx
 import openai
 from sqlalchemy import text
 
@@ -120,91 +122,101 @@ class ArxivAgent:
 
     # ── Получение новых бумаг ─────────────────────────────────────────────────
 
+    _ARXIV_API_URL = "https://export.arxiv.org/api/query"
+
+    async def _fetch_query(
+        self,
+        query: str,
+        client: httpx.AsyncClient,
+        seen_ids: set[str],
+        cutoff: datetime,
+    ) -> list[dict]:
+        """
+        Один async HTTP-запрос к arXiv API для одного поискового запроса.
+
+        Использует httpx с явными timeout-ами вместо синхронного arxiv.Client.
+        Парсит Atom XML через feedparser.parse(text) — без сети, мгновенно.
+        """
+        cat_filter = " OR ".join(f"cat:{c}" for c in ARXIV_CATEGORIES)
+        params = {
+            "search_query": f"({query}) AND ({cat_filter})",
+            "max_results":  str(ARXIV_MAX_PER_QUERY),
+            "sortBy":       "submittedDate",
+            "sortOrder":    "descending",
+            "start":        "0",
+        }
+        try:
+            response = await client.get(self._ARXIV_API_URL, params=params)
+            response.raise_for_status()
+        except Exception as exc:
+            logger.warning(f"[arxiv_agent] Ошибка HTTP запроса '{query}': {exc}")
+            return []
+
+        feed = feedparser.parse(response.text)
+        papers: list[dict] = []
+
+        for entry in feed.entries[:ARXIV_MAX_PER_QUERY]:
+            raw_id   = entry.id.rsplit("/", 1)[-1]        # "2502.12345v1"
+            arxiv_id = re.sub(r"v\d+$", "", raw_id)       # "2502.12345"
+
+            if arxiv_id in seen_ids:
+                continue
+
+            try:
+                pub = datetime(*entry.published_parsed[:6])
+            except Exception:
+                continue
+
+            if pub < cutoff:
+                continue
+
+            seen_ids.add(arxiv_id)
+            authors    = [a.name for a in entry.authors] if hasattr(entry, "authors") else []
+            categories = [t.term for t in entry.tags]   if hasattr(entry, "tags")    else []
+
+            papers.append({
+                "arxiv_id":   arxiv_id,
+                "title":      entry.title,
+                "authors":    authors,
+                "abstract":   entry.summary,
+                "published":  pub.strftime("%Y-%m-%d"),
+                "categories": categories,
+                "arxiv_url":  f"https://arxiv.org/abs/{raw_id}",
+            })
+
+        return papers
+
     async def fetch_new_papers(self) -> list[dict]:
         """
         Получает бумаги с arXiv API и фильтрует уже опубликованные.
 
-        arxiv.Client() — синхронный, запускается через run_in_executor
-        чтобы не блокировать event loop.
+        Использует httpx.AsyncClient (нативный async) вместо синхронного arxiv.Client
+        в run_in_executor. Это устраняет проблему с зависанием на RU VPS — явный
+        timeout на каждый HTTP-запрос (connect=10s, read=30s per chunk).
 
         Returns:
             Список словарей с метаданными новых бумаг.
         """
-        loop = asyncio.get_running_loop()
+        cutoff   = datetime.now() - timedelta(days=ARXIV_DAYS_LOOKBACK)
+        seen_ids: set[str] = set()
+        all_papers: list[dict] = []
 
-        def _sync_fetch() -> list[dict]:
-            """Синхронный блок: запрос к arXiv API."""
-            import socket
-            import arxiv  # импорт здесь — не в top-level, чтобы не ломать запуск без пакета
+        # Явный timeout: connect=10с — быстро фейл если сервер недоступен;
+        # read=30с — достаточно для получения 5 результатов
+        timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 
-            # Обязательный timeout для синхронных HTTP запросов (arxiv использует requests)
-            # Без этого requests может зависнуть навсегда на медленном соединении с RU VPS
-            # 10с — проверено в прямом тесте: 4 запроса выполняются за ~13с суммарно
-            socket.setdefaulttimeout(10)
-
-            cutoff = datetime.now() - timedelta(days=ARXIV_DAYS_LOOKBACK)
-            seen_ids: set[str] = set()
-            papers: list[dict] = []
-            # page_size=ARXIV_MAX_PER_QUERY — URL-параметр max_results будет равен 5,
-            # иначе по умолчанию 100 (Client запрашивает 100, даже если Search.max_results=5)
-            # num_retries=1 — по умолчанию 3, это 3× socket_timeout дополнительных задержек
-            # delay_seconds=1 — по умолчанию 3с между запросами страниц (нам хватит 1с)
-            client = arxiv.Client(
-                page_size=ARXIV_MAX_PER_QUERY,
-                num_retries=1,
-                delay_seconds=1.0,
-            )
-
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+        ) as client:
             for query in ARXIV_QUERIES:
-                cat_filter = " OR ".join(f"cat:{c}" for c in ARXIV_CATEGORIES)
-                full_query = f"({query}) AND ({cat_filter})"
+                papers = await self._fetch_query(query, client, seen_ids, cutoff)
+                all_papers.extend(papers)
+                if papers:
+                    logger.debug(
+                        f"[arxiv_agent] Запрос '{query[:40]}': {len(papers)} бумаг"
+                    )
 
-                search = arxiv.Search(
-                    query=full_query,
-                    max_results=ARXIV_MAX_PER_QUERY,  # только нужное кол-во, не лишние
-                    sort_by=arxiv.SortCriterion.SubmittedDate,
-                    sort_order=arxiv.SortOrder.Descending,
-                )
-
-                try:
-                    count = 0
-                    for paper in client.results(search):
-                        if count >= ARXIV_MAX_PER_QUERY:
-                            break
-                        pub = paper.published.replace(tzinfo=None)
-                        if pub < cutoff:
-                            break  # отсортированы по дате desc — дальше только старее
-
-                        short_id = paper.get_short_id()
-                        if short_id in seen_ids:
-                            continue
-                        seen_ids.add(short_id)
-
-                        arxiv_id = re.sub(r"v\d+$", "", short_id)
-                        papers.append({
-                            "arxiv_id":   arxiv_id,
-                            "title":      paper.title,
-                            "authors":    [a.name for a in paper.authors],
-                            "abstract":   paper.summary,
-                            "published":  paper.published.strftime("%Y-%m-%d"),
-                            "categories": paper.categories,
-                            "arxiv_url":  f"https://arxiv.org/abs/{short_id}",
-                        })
-                        count += 1
-
-                except Exception as exc:
-                    logger.warning(f"[arxiv_agent] Ошибка запроса '{query}': {exc}")
-
-            return papers
-
-        try:
-            all_papers = await asyncio.wait_for(
-                loop.run_in_executor(None, _sync_fetch),
-                timeout=90.0,  # 5 запросов × 10с socket timeout = 50с макс; 90с — запас
-            )
-        except asyncio.TimeoutError:
-            logger.error("[arxiv_agent] Timeout при получении бумаг с arXiv (>90s) — пропускаем прогон")
-            return []
         logger.info(f"[arxiv_agent] Получено с API: {len(all_papers)} бумаг")
 
         if not all_papers:
