@@ -19,10 +19,10 @@ RSS-источники (11 источников)
 [2] Fact-Checker — Perplexity sonar (веб-поиск), confidence score, источники
      │ верифицировано
      ▼
-[3] Writer       — Perplexity sonar-pro, определяет формат и стиль поста
+[3] Writer       — Perplexity sonar, определяет формат и стиль поста
      │ черновик
      ▼
-[4] Formatter    — Perplexity sonar-pro, Telegram HTML-разметка, опц. Leonardo AI
+[4] Formatter    — Perplexity sonar, Telegram HTML-разметка, опц. Leonardo AI
      │ HTML-пост
      ▼
 [5] Analyst      — качество, семантическая дедупликация, публикация в канал
@@ -30,6 +30,45 @@ RSS-источники (11 источников)
 
 Каждый агент пишет статус в `agent_logs` (latency, tokens, reason).
 Каждый прогон — запись в `pipeline_runs`.
+
+## arXiv пайплайн (отдельный тип поста)
+
+Параллельно с основным пайплайном работает отдельный arXiv-агент:
+
+```
+Cron (18:00 МСК) / POST /api/pipeline/run_arxiv
+     │
+     ▼
+ArxivAgent.fetch_new_papers()   — httpx async запросы к export.arxiv.org API
+     │ Atom XML → feedparser.parse(text)
+     │ фильтрация через таблицу arxiv_seen_papers
+     ▼
+Для каждой бумаги (до 2 шт. за прогон):
+     _extract_github(abstract)  — regex GitHub URL из аннотации
+     _summarize_paper()         — Perplexity sonar, обзор на русском
+     _format_html_post()        — HTML для Telegram
+     publish_post()             — публикация в канал
+     INSERT arxiv_seen_papers   — дедупликация на уровне БД
+```
+
+Запросы к arXiv API: 5 поисковых запросов (`ARXIV_QUERIES`) × 5 результатов.
+Дедупликация: таблица `arxiv_seen_papers` (PRIMARY KEY = arxiv_id без версии, напр. `2502.12345`).
+
+---
+
+## Формат arXiv-поста
+
+```
+📄 <b>Title of the Paper</b>
+
+👥 Author1, Author2 и др. (N авт.)
+📅 2026-02-28 | 📂 cs.AI, cs.LG
+
+[Обзор на русском 300–800 символов от Perplexity sonar]
+
+🔗 arXiv (ссылка)
+💻 GitHub (ссылка — только если найдена в аннотации)
+```
 
 ---
 
@@ -302,9 +341,13 @@ curl -X POST http://HOST:8000/api/pipeline/run \
 # Утренний дайджест (все верифицированные новости в один пост)
 curl -X POST "http://HOST:8000/api/pipeline/run?is_morning=true" \
   -u "admin:PASSWORD"
+
+# arXiv прогон (научные бумаги)
+curl -X POST http://HOST:8000/api/pipeline/run_arxiv \
+  -u "admin:PASSWORD"
 ```
 
-Оба вызова возвращают немедленно: `{"run_id": N, "status": "started", "mode": "single"|"digest"}`.
+Все вызовы возвращают немедленно: `{"run_id": N, "status": "started", "mode": "single"|"digest"|"arxiv"}`.
 
 ### Web-интерфейс
 
@@ -315,6 +358,7 @@ curl -X POST "http://HOST:8000/api/pipeline/run?is_morning=true" \
 | `GET  /dashboard` | Chart.js: воронка агентов, топ источников, токены |
 | `POST /api/pipeline/run` | Ручной запуск (одиночный) |
 | `POST /api/pipeline/run?is_morning=true` | Ручной запуск (дайджест) |
+| `POST /api/pipeline/run_arxiv` | Ручной запуск (arXiv бумаги) |
 | `GET  /api/dashboard/funnel` | Статистика по агентам (JSON) |
 | `GET  /api/dashboard/sources` | Топ RSS-источников (JSON) |
 | `GET  /api/dashboard/timeline` | Публикации по дням (JSON) |
@@ -340,6 +384,7 @@ curl -X POST "http://HOST:8000/api/pipeline/run?is_morning=true" -u "admin:PASSW
 
 По умолчанию 3 слота в день (МСК): **09:00 / 14:00 / 19:00**.
 Утренний дайджест: **07:00** (управляется настройкой `morning_digest_hour`).
+arXiv прогон: **18:00** ежедневно (управляется настройками `arxiv_schedule_*`).
 
 Расписание и все настройки меняются через `/admin` → Settings без перезапуска.
 
@@ -356,6 +401,9 @@ curl -X POST "http://HOST:8000/api/pipeline/run?is_morning=true" -u "admin:PASSW
 | `dedup_threshold` | `0.80` | Порог cosine similarity для семантической дедупликации |
 | `dedup_lookback_days` | `30` | Окно дедупликации (дней) |
 | `image_enabled` | `false` | Картинки через Leonardo AI (только single) |
+| `arxiv_schedule_enabled` | `true` | Включить автоматический запуск arXiv агента |
+| `arxiv_schedule_hour` | `18` | Час ежедневного запуска arXiv агента (МСК, 0–23) |
+| `arxiv_max_papers` | `2` | Максимальное количество бумаг за один arXiv прогон |
 
 ---
 
@@ -402,27 +450,29 @@ tg_news_bot/
 │   ├── fact_checker.py  # Верификация через Perplexity sonar
 │   ├── writer.py        # 4 стиля, 3 формата, write_post() + write_digest()
 │   ├── formatter.py     # Telegram HTML, очистка артефактов, Leonardo AI
-│   └── analyst.py       # Дедупликация, публикация в канал
+│   ├── analyst.py       # Дедупликация, публикация в канал
+│   └── arxiv_agent.py   # arXiv API (httpx async) + Perplexity sumarization
 ├── core/
-│   ├── pipeline.py      # Оркестрация: single-прогон + digest-прогон
+│   ├── pipeline.py      # Оркестрация: single/digest + run_arxiv_pipeline()
 │   ├── publisher.py     # Telegram Bot API (send_message / send_photo)
-│   ├── scheduler.py     # APScheduler + определение режима дайджеста
+│   ├── scheduler.py     # APScheduler + cron для arXiv (arxiv_daily)
 │   ├── dedup.py         # Семантическая дедупликация (embeddings)
 │   └── config.py        # Settings (pydantic-settings) + get/set_setting()
 ├── db/
-│   ├── models.py        # SQLAlchemy ORM (7 таблиц)
+│   ├── models.py        # SQLAlchemy ORM (8 таблиц, включая arxiv_seen_papers)
 │   └── database.py      # async_session_factory + engine
 ├── web/
 │   ├── admin.py         # FastAPI app + sqladmin + HTTP Basic Auth
-│   └── dashboard.py     # Chart.js API endpoints
+│   └── dashboard.py     # Chart.js API endpoints + /api/pipeline/run_arxiv
 ├── templates/
 │   ├── base.html        # Dark-theme layout
 │   └── dashboard.html   # Chart.js дашборд
 ├── scripts/
-│   ├── init_db.py            # Инициализация БД и seed-данных (idempotent)
-│   ├── update_sources_rss.py # Миграция RSS URL в существующей БД (idempotent)
-│   ├── healthcheck.py        # Pre-deploy проверки (токен, DB)
-│   └── deploy_vps.py         # Автодеплой через paramiko SSH
+│   ├── init_db.py                # Инициализация БД и seed-данных (idempotent)
+│   ├── update_sources_rss.py     # Миграция RSS URL в существующей БД (idempotent)
+│   ├── migrate_add_arxiv_seen.py # Миграция: arxiv_seen_papers + настройки arXiv
+│   ├── healthcheck.py            # Pre-deploy проверки (токен, DB)
+│   └── deploy_vps.py             # Автодеплой через paramiko SSH
 ├── Dockerfile
 ├── main.py              # Entrypoint: FastAPI + APScheduler
 └── requirements.txt
@@ -450,10 +500,27 @@ tg_news_bot/
 | `longread` | 4096 | Telegram message limit |
 | `digest` | 4096 | Telegram message limit |
 
+### arXiv API — httpx вместо arxiv library
+
+Официальная библиотека `arxiv` использует `feedparser` + `urllib3` синхронно.
+При вызове из `asyncio.run_in_executor` на RU VPS она зависала >90 секунд даже для одного запроса.
+
+Решение: прямые HTTP-запросы к `export.arxiv.org/api/query` через `httpx.AsyncClient` с явными timeout-ами:
+
+```python
+timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
+async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    response = await client.get(ARXIV_API_URL, params=params)
+feed = feedparser.parse(response.text)  # парсинг из строки — без сети
+```
+
+Ответ arXiv — стандартный Atom XML, `feedparser.parse(text)` обрабатывает его мгновенно.
+
 ### Гео-блокировки на RU VPS
 - OpenAI, Anthropic — заблокированы (403)
 - DeepSeek — блокируется внутри Docker-контейнера (Connection error; с хоста может работать, но в контейнере — нет)
 - Perplexity — работает глобально, единственный надёжный AI API с RU VPS
+- arXiv (`export.arxiv.org`) — работает ✅
 - Семантическая дедупликация (OpenAI embeddings) отключена, используется только URL-дедупликация
 
 ### RSS-источники
@@ -554,7 +621,8 @@ docker exec newsbot python scripts/test_quality.py --n 5 --formatter
 | Writer (3 поста) | `sonar` + context=low | ~$0.0005 |
 | Formatter (3 поста) | `sonar` + context=low | ~$0.0003 |
 | Fact-Checker (15 проверок) | `sonar` + context=high | ~$0.001 |
+| arXiv summarizer (2 бумаги) | `sonar` + context=low | ~$0.0003 |
 | Leonardo AI (если включено, только single) | — | ~$0.06 |
-| **Итого без изображений** | | **~$0.002/день (~$0.05/месяц)** |
+| **Итого без изображений** | | **~$0.0023/день (~$0.07/месяц)** |
 
 > До оптимизации (sonar-pro): ~$0.005/день. **Экономия после A/B теста: ~60%.**
