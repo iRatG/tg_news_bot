@@ -145,7 +145,15 @@ class ArxivAgent:
             cutoff = datetime.now() - timedelta(days=ARXIV_DAYS_LOOKBACK)
             seen_ids: set[str] = set()
             papers: list[dict] = []
-            client = arxiv.Client()
+            # page_size=ARXIV_MAX_PER_QUERY — URL-параметр max_results будет равен 5,
+            # иначе по умолчанию 100 (Client запрашивает 100, даже если Search.max_results=5)
+            # num_retries=1 — по умолчанию 3, это 3× socket_timeout дополнительных задержек
+            # delay_seconds=1 — по умолчанию 3с между запросами страниц (нам хватит 1с)
+            client = arxiv.Client(
+                page_size=ARXIV_MAX_PER_QUERY,
+                num_retries=1,
+                delay_seconds=1.0,
+            )
 
             for query in ARXIV_QUERIES:
                 cat_filter = " OR ".join(f"cat:{c}" for c in ARXIV_CATEGORIES)
