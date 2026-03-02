@@ -268,10 +268,14 @@ async def start_scheduler() -> None:
     Запускает планировщик и загружает расписание из БД.
 
     Вызывается из main.py при старте приложения.
+
+    Порядок важен: scheduler.start() ПЕРВЫМ — только после этого
+    get_jobs() видит персистированные задачи из jobstore, и
+    reload_schedule() может корректно удалить устаревшие.
     """
-    await reload_schedule()
     scheduler.start()
     logger.info("[scheduler] APScheduler запущен")
+    await reload_schedule()
 
     # Выводим ближайшие задачи для проверки
     jobs = scheduler.get_jobs()
