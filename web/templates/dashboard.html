@@ -69,6 +69,33 @@
     </div>
 </div>
 
+<!-- ── Subscriber growth ────────────────────────────────────────────── -->
+<div class="grid">
+    <div class="card card-full" style="grid-column:1/-1">
+        <h3>Рост подписчиков</h3>
+        <div id="subscriber-empty" style="color:var(--muted);text-align:center;padding:40px 0;display:none">
+            Данные начнут накапливаться с сегодняшнего дня — график появится через несколько дней
+        </div>
+        <canvas id="chartSubscribers" height="100"></canvas>
+    </div>
+</div>
+
+<!-- ── Analytics row ───────────────────────────────────────────────── -->
+<div class="grid">
+    <div class="card">
+        <h3>Активность по часам суток</h3>
+        <canvas id="chartHours" height="220"></canvas>
+    </div>
+    <div class="card">
+        <h3>Тип контента (90 дней)</h3>
+        <canvas id="chartMix" height="220"></canvas>
+    </div>
+    <div class="card">
+        <h3>Эффективность прогонов (30 дней)</h3>
+        <div id="run-stats" style="padding:16px 0"></div>
+    </div>
+</div>
+
 <!-- ── Recent posts ────────────────────────────────────────────────────── -->
 <div class="card" style="margin-bottom:20px">
     <h3>Последние публикации</h3>
@@ -303,6 +330,148 @@ function renderTokens(data) {
     });
 }
 
+// ── 6. Subscriber growth (line chart) ────────────────────────────────────────
+function renderSubscribers(data) {
+    const canvas = document.getElementById('chartSubscribers');
+    const empty  = document.getElementById('subscriber-empty');
+    if (!data || data.length < 2) {
+        canvas.style.display = 'none';
+        empty.style.display  = 'block';
+        return;
+    }
+    canvas.style.display = '';
+    empty.style.display  = 'none';
+    if (charts.subscribers) charts.subscribers.destroy();
+    charts.subscribers = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: data.map(r => r.date),
+            datasets: [{
+                label:                'Подписчики',
+                data:                 data.map(r => r.count),
+                borderColor:          C.accent,
+                backgroundColor:      'rgba(99,102,241,0.12)',
+                borderWidth:          2,
+                tension:              0.3,
+                fill:                 true,
+                pointRadius:          3,
+                pointBackgroundColor: C.accent,
+            }],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                ...tooltipStyle().plugins,
+                legend: { display: false },
+            },
+            scales: {
+                x: { ...gridOpts('x'), ticks: { maxTicksLimit: 20, color: C.muted } },
+                y: {
+                    ...gridOpts('y'),
+                    ticks: {
+                        color: C.muted,
+                        callback: v => v.toLocaleString('ru'),
+                    },
+                },
+            },
+        },
+    });
+}
+
+// ── 7. Post activity by hour (bar) ────────────────────────────────────────────
+function renderHours(postByHour) {
+    if (charts.hours) charts.hours.destroy();
+    const labels = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,'0')}:00`);
+    charts.hours = new Chart(document.getElementById('chartHours'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                data:            postByHour,
+                backgroundColor: postByHour.map(v =>
+                    v === Math.max(...postByHour) ? C.green : C.accent + 'aa'),
+                borderRadius:    3,
+            }],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                ...tooltipStyle().plugins,
+                legend: { display: false },
+            },
+            scales: {
+                x: { ...gridOpts('x'), ticks: { maxTicksLimit: 12, color: C.muted } },
+                y: { ...gridOpts('y'), beginAtZero: true, ticks: { stepSize: 1 } },
+            },
+        },
+    });
+}
+
+// ── 8. Content mix (doughnut) ─────────────────────────────────────────────────
+function renderMix(mixData) {
+    if (!mixData || mixData.length === 0) {
+        document.getElementById('chartMix').parentElement.innerHTML =
+            '<h3>Тип контента (90 дней)</h3>' +
+            '<p style="color:var(--muted);text-align:center;margin-top:40px">Нет данных</p>';
+        return;
+    }
+    if (charts.mix) charts.mix.destroy();
+    const palette = [C.blue, C.yellow, C.green, C.purple];
+    charts.mix = new Chart(document.getElementById('chartMix'), {
+        type: 'doughnut',
+        data: {
+            labels:   mixData.map(r => r.type),
+            datasets: [{
+                data:            mixData.map(r => r.count),
+                backgroundColor: palette.slice(0, mixData.length),
+                borderColor:     C.surface,
+                borderWidth:     2,
+            }],
+        },
+        options: {
+            responsive: true,
+            cutout: '60%',
+            plugins: {
+                ...tooltipStyle().plugins,
+                legend: { position: 'bottom', labels: { color: '#e2e8f0', boxWidth: 14 } },
+            },
+        },
+    });
+}
+
+// ── 9. Run effectiveness (stat cards) ─────────────────────────────────────────
+function renderRunStats(stats) {
+    const el = document.getElementById('run-stats');
+    if (!stats || stats.total === 0) {
+        el.innerHTML = '<p style="color:var(--muted);text-align:center">Нет данных за 30 дней</p>';
+        return;
+    }
+    const successPct = stats.total > 0
+        ? Math.round((stats.ok / stats.total) * 100) : 0;
+    const avgPub = stats.ok > 0
+        ? (stats.total_published / stats.ok).toFixed(1) : '0';
+    el.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div style="text-align:center;padding:12px;background:var(--surface);border-radius:8px">
+                <div style="font-size:1.6rem;font-weight:700;color:var(--text)">${stats.total}</div>
+                <div style="font-size:0.75rem;color:var(--muted)">Всего прогонов</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:var(--surface);border-radius:8px">
+                <div style="font-size:1.6rem;font-weight:700;color:${successPct >= 80 ? C.green : C.yellow}">${successPct}%</div>
+                <div style="font-size:0.75rem;color:var(--muted)">Успешных</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:var(--surface);border-radius:8px">
+                <div style="font-size:1.6rem;font-weight:700;color:var(--text)">${stats.total_published}</div>
+                <div style="font-size:0.75rem;color:var(--muted)">Опубликовано</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:var(--surface);border-radius:8px">
+                <div style="font-size:1.6rem;font-weight:700;color:${C.accent}">${avgPub}</div>
+                <div style="font-size:0.75rem;color:var(--muted)">Ср. постов/прогон</div>
+            </div>
+        </div>
+    `;
+}
+
 // ── Recent posts table ────────────────────────────────────────────────────────
 function renderPosts(posts) {
     const tbody = document.getElementById('posts-tbody');
@@ -368,13 +537,16 @@ async function triggerArxiv() {
 // ── Load all data in parallel ─────────────────────────────────────────────────
 async function loadDashboard() {
     try {
-        const [funnelRaw, sources, timelineRaw, costsRaw, posts, channelStats] = await Promise.all([
+        const [funnelRaw, sources, timelineRaw, costsRaw, posts, channelStats,
+               subHistory, analyticsData] = await Promise.all([
             fetch('/api/dashboard/funnel').then(r => r.json()),
             fetch('/api/dashboard/sources').then(r => r.json()),
             fetch('/api/dashboard/timeline').then(r => r.json()),
             fetch('/api/dashboard/costs').then(r => r.json()),
             fetch('/api/dashboard/recent_posts').then(r => r.json()),
             fetch('/api/dashboard/channel_stats').then(r => r.json()),
+            fetch('/api/dashboard/subscriber_history').then(r => r.json()),
+            fetch('/api/dashboard/analytics').then(r => r.json()),
         ]);
 
         // Трансформация воронки: массив агентов → плоский объект для renderFunnel
@@ -420,6 +592,10 @@ async function loadDashboard() {
         renderReject({ labels: [], counts: [] });
         renderTimeline(timeline);
         renderTokens(costs.token_usage);
+        renderSubscribers(subHistory);
+        renderHours(analyticsData?.post_by_hour  ?? []);
+        renderMix(analyticsData?.content_mix      ?? []);
+        renderRunStats(analyticsData?.run_stats    ?? null);
         renderPosts(posts);
     } catch (err) {
         console.error('Dashboard load error:', err);

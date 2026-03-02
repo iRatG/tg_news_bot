@@ -201,18 +201,39 @@ async def channel_stats(_=Depends(verify_credentials)):
     """
     Количество подписчиков Telegram-канала через Bot API.
 
-    Использует getChat и getChatMemberCount — не требует прав администратора,
-    достаточно того, что бот является участником канала.
+    Также сохраняет snapshot в channel_stats_history (INSERT OR REPLACE по дате),
+    чтобы данные накапливались для графика роста.
     """
+    from datetime import date
+
     from core.config import settings
+
     try:
         from telegram import Bot
+
         bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
         async with bot:
             member_count = await bot.get_chat_member_count(
                 chat_id=settings.TELEGRAM_CHANNEL_ID
             )
             chat = await bot.get_chat(chat_id=settings.TELEGRAM_CHANNEL_ID)
+
+        # Сохраняем snapshot в историю
+        today = date.today().isoformat()
+        try:
+            async with async_session_factory() as session:
+                await session.execute(
+                    text(
+                        "INSERT OR REPLACE INTO channel_stats_history "
+                        "(date, subscriber_count, fetched_at) "
+                        "VALUES (:date, :count, datetime('now'))"
+                    ),
+                    {"date": today, "count": member_count},
+                )
+                await session.commit()
+        except Exception as db_exc:
+            logger.warning(f"[dashboard] Не удалось сохранить snapshot: {db_exc}")
+
         return {
             "member_count": member_count,
             "title":        chat.title,
@@ -221,6 +242,90 @@ async def channel_stats(_=Depends(verify_credentials)):
     except Exception as exc:
         logger.warning(f"[dashboard] Ошибка получения статистики канала: {exc}")
         return {"member_count": None, "title": None, "username": None}
+
+
+# ── История подписчиков ───────────────────────────────────────────────────────
+
+@app.get("/api/dashboard/subscriber_history")
+async def subscriber_history(_=Depends(verify_credentials)):
+    """
+    История числа подписчиков канала за последние 60 дней.
+
+    Используется для Line chart "Рост подписчиков" на дашборде.
+    Данные накапливаются ежедневно через scheduler и при загрузке дашборда.
+    """
+    async with async_session_factory() as session:
+        rows = (await session.execute(text("""
+            SELECT date, subscriber_count
+            FROM channel_stats_history
+            WHERE date >= date('now', '-60 days')
+            ORDER BY date ASC
+        """))).fetchall()
+
+    return [{"date": r[0], "count": r[1]} for r in rows]
+
+
+# ── Аналитика из собственных данных ──────────────────────────────────────────
+
+@app.get("/api/dashboard/analytics")
+async def analytics(_=Depends(verify_credentials)):
+    """
+    Аналитика из собственных данных БД (без внешних API):
+    - Активность публикаций по часам суток (последние 30 дней)
+    - Соотношение типов контента: arXiv / новости (последние 90 дней)
+    - Успешность пайплайн-прогонов (последние 30 дней)
+    """
+    async with async_session_factory() as session:
+
+        # Активность публикаций по часам суток
+        hour_rows = (await session.execute(text("""
+            SELECT CAST(strftime('%H', published_at) AS INTEGER) AS hour,
+                   COUNT(*) AS cnt
+            FROM published_posts
+            WHERE published_at > datetime('now', '-30 days')
+            GROUP BY hour
+            ORDER BY hour
+        """))).fetchall()
+
+        # Соотношение контента: arXiv vs новости
+        mix_rows = (await session.execute(text("""
+            SELECT
+                CASE WHEN s.name = 'arXiv API' THEN 'arXiv' ELSE 'Новости' END AS type,
+                COUNT(*) AS cnt
+            FROM published_posts pp
+            JOIN raw_articles ra ON ra.id = pp.article_id
+            JOIN sources s ON s.id = ra.source_id
+            WHERE pp.published_at > datetime('now', '-90 days')
+            GROUP BY type
+        """))).fetchall()
+
+        # Успешность прогонов
+        run_row = (await session.execute(text("""
+            SELECT
+                COUNT(*)                                                          AS total,
+                SUM(CASE WHEN status IN ('completed','completed_empty') THEN 1 ELSE 0 END) AS ok,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)               AS failed,
+                COALESCE(SUM(articles_published), 0)                              AS total_published
+            FROM pipeline_runs
+            WHERE started_at > datetime('now', '-30 days')
+        """))).fetchone()
+
+    # Массив 24 часа (0..23), нули для часов без публикаций
+    hour_map = {r[0]: r[1] for r in hour_rows}
+    post_by_hour = [hour_map.get(h, 0) for h in range(24)]
+
+    run_stats = {
+        "total":           run_row[0] or 0,
+        "ok":              run_row[1] or 0,
+        "failed":          run_row[2] or 0,
+        "total_published": run_row[3] or 0,
+    }
+
+    return {
+        "post_by_hour":  post_by_hour,
+        "content_mix":   [{"type": r[0], "count": r[1]} for r in mix_rows],
+        "run_stats":     run_stats,
+    }
 
 
 # ── Ручной запуск пайплайна ───────────────────────────────────────────────────

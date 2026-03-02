@@ -253,6 +253,21 @@ class PostStats(Base):
         return f"<PostStats(id={self.id}, post_id={self.post_id}, views={self.views})>"
 
 
+class ChannelStatsHistory(Base):
+    """Ежедневный snapshot числа подписчиков Telegram-канала."""
+
+    __tablename__ = "channel_stats_history"
+
+    date: Mapped[str] = mapped_column(String, primary_key=True)  # "2026-03-02"
+    subscriber_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<ChannelStatsHistory(date={self.date!r}, count={self.subscriber_count})>"
+
+
 class ArxivSeenPaper(Base):
     """Таблица для дедупликации бумаг arXiv (заменяет seen_papers.json)."""
 

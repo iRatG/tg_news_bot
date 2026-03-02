@@ -74,6 +74,44 @@ async def _run_pipeline_job() -> None:
         logger.error(f"[scheduler] Ошибка запланированного прогона: {exc}", exc_info=True)
 
 
+async def _run_channel_stats_snapshot() -> None:
+    """
+    Ежедневный snapshot числа подписчиков Telegram-канала.
+
+    Сохраняет текущее число подписчиков в таблицу channel_stats_history.
+    Использует INSERT OR REPLACE — одна запись на день, обновляется при повторном вызове.
+    """
+    from datetime import datetime as _dt
+
+    from sqlalchemy import text as _text
+
+    from core.config import settings
+    from db.database import async_session_factory
+
+    try:
+        from telegram import Bot
+
+        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+        async with bot:
+            count = await bot.get_chat_member_count(chat_id=settings.TELEGRAM_CHANNEL_ID)
+
+        today = _dt.now().strftime("%Y-%m-%d")
+        async with async_session_factory() as session:
+            await session.execute(
+                _text(
+                    "INSERT OR REPLACE INTO channel_stats_history "
+                    "(date, subscriber_count, fetched_at) "
+                    "VALUES (:date, :count, datetime('now'))"
+                ),
+                {"date": today, "count": count},
+            )
+            await session.commit()
+
+        logger.info(f"[scheduler] Snapshot подписчиков: {count} ({today})")
+    except Exception as exc:
+        logger.error(f"[scheduler] Ошибка snapshot подписчиков: {exc}", exc_info=True)
+
+
 async def _run_arxiv_job() -> None:
     """
     Точка входа для APScheduler — запускает arXiv пайплайн.
@@ -166,6 +204,19 @@ async def reload_schedule() -> None:
         logger.info(f"[scheduler] arXiv задача: ежедневно в {arxiv_hour:02d}:00 МСК")
     else:
         logger.info("[scheduler] arXiv задача отключена (arxiv_schedule_enabled=false)")
+
+    # ── Snapshot подписчиков канала ────────────────────────────────────────────
+    scheduler.add_job(
+        func=_run_channel_stats_snapshot,
+        trigger="cron",
+        hour=0,
+        minute=5,
+        day_of_week="mon-sun",
+        id="channel_stats_daily",
+        replace_existing=True,
+        name="Channel stats snapshot 00:05 MSK",
+    )
+    logger.info("[scheduler] Snapshot подписчиков: ежедневно в 00:05 МСК")
 
 
 async def start_scheduler() -> None:
