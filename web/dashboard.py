@@ -194,6 +194,35 @@ async def recent_posts(_=Depends(verify_credentials)):
     ]
 
 
+# ── Статистика Telegram-канала ────────────────────────────────────────────────
+
+@app.get("/api/dashboard/channel_stats")
+async def channel_stats(_=Depends(verify_credentials)):
+    """
+    Количество подписчиков Telegram-канала через Bot API.
+
+    Использует getChat и getChatMemberCount — не требует прав администратора,
+    достаточно того, что бот является участником канала.
+    """
+    from core.config import settings
+    try:
+        from telegram import Bot
+        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+        async with bot:
+            member_count = await bot.get_chat_member_count(
+                chat_id=settings.TELEGRAM_CHANNEL_ID
+            )
+            chat = await bot.get_chat(chat_id=settings.TELEGRAM_CHANNEL_ID)
+        return {
+            "member_count": member_count,
+            "title":        chat.title,
+            "username":     getattr(chat, "username", None),
+        }
+    except Exception as exc:
+        logger.warning(f"[dashboard] Ошибка получения статистики канала: {exc}")
+        return {"member_count": None, "title": None, "username": None}
+
+
 # ── Ручной запуск пайплайна ───────────────────────────────────────────────────
 
 @app.post("/api/pipeline/run")

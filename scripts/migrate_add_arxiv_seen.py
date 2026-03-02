@@ -56,7 +56,7 @@ settings_rows = [
      "Включить автоматический запуск arXiv агента (true/false)"),
     ("arxiv_schedule_hour", "18",
      "Час ежедневного запуска arXiv агента (МСК, 0-23)"),
-    ("arxiv_max_papers", "2",
+    ("arxiv_max_papers", "1",
      "Максимальное количество бумаг за один arXiv прогон"),
 ]
 

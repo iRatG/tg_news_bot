@@ -41,8 +41,11 @@
             margin-left: 20px;
             font-size: 13px;
             transition: color 0.2s;
+            padding: 4px 10px;
+            border-radius: 6px;
         }
-        header nav a:hover { color: var(--text); }
+        header nav a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+        header nav a.active { color: var(--text); background: var(--border); }
         main { padding: 24px; max-width: 1400px; margin: 0 auto; }
         .grid {
             display: grid;
@@ -129,12 +132,20 @@
 </head>
 <body>
     <header>
-        <h1>📡 NewsBot Dashboard</h1>
+        <h1>📡 NewsBot</h1>
         <nav>
-            <a href="/dashboard">Dashboard</a>
-            <a href="/admin">Admin Panel</a>
+            <a href="/dashboard" id="nav-dashboard">Дашборд</a>
+            <a href="/admin" id="nav-admin">Настройки</a>
         </nav>
     </header>
+    <script>
+        // Подсвечиваем активную ссылку
+        (function() {
+            const path = window.location.pathname;
+            if (path.startsWith('/dashboard')) document.getElementById('nav-dashboard').classList.add('active');
+            if (path.startsWith('/admin'))     document.getElementById('nav-admin').classList.add('active');
+        })();
+    </script>
     <main>
         {% block content %}{% endblock %}
     </main>

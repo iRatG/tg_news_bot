@@ -21,8 +21,13 @@
         <div class="value" id="stat-cost">—</div>
         <div class="label">Расходы за месяц ($)</div>
     </div>
-    <div style="display:flex;align-items:center;padding:0 8px;">
-        <button class="run-btn" id="run-btn" onclick="triggerRun()">▶ Запустить прогон</button>
+    <div class="stat">
+        <div class="value" id="stat-subscribers">—</div>
+        <div class="label">Подписчиков в канале</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:0 8px;">
+        <button class="run-btn" id="run-btn" onclick="triggerRun()">▶ Прогон</button>
+        <button class="run-btn" id="arxiv-btn" onclick="triggerArxiv()" style="background:var(--blue)">📄 arXiv</button>
     </div>
 </div>
 
@@ -324,7 +329,7 @@ function renderPosts(posts) {
 }
 
 // ── Stat cards ────────────────────────────────────────────────────────────────
-function updateStats(funnel, costs, sourcesData) {
+function updateStats(funnel, costs, sourcesData, channelStats) {
     document.getElementById('stat-total-runs').textContent =
         funnel.total_runs ?? '—';
     document.getElementById('stat-published').textContent =
@@ -333,17 +338,43 @@ function updateStats(funnel, costs, sourcesData) {
         sourcesData.length ?? '—';
     const totalCost = (costs?.total_usd ?? 0).toFixed(4);
     document.getElementById('stat-cost').textContent = '$' + totalCost;
+
+    const cnt = channelStats?.member_count;
+    document.getElementById('stat-subscribers').textContent =
+        cnt != null ? cnt.toLocaleString('ru') : '—';
+}
+
+// ── arXiv run trigger ─────────────────────────────────────────────────────────
+async function triggerArxiv() {
+    const btn = document.getElementById('arxiv-btn');
+    btn.disabled    = true;
+    btn.textContent = '⏳ arXiv...';
+    try {
+        const resp = await fetch('/api/pipeline/run_arxiv', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast(`✓ arXiv прогон #${data.run_id} запущен`);
+        } else {
+            showToast('Ошибка: ' + (data.detail ?? 'неизвестная'), 5000);
+        }
+    } catch (err) {
+        showToast('Сетевая ошибка: ' + err.message, 5000);
+    } finally {
+        btn.disabled    = false;
+        btn.textContent = '📄 arXiv';
+    }
 }
 
 // ── Load all data in parallel ─────────────────────────────────────────────────
 async function loadDashboard() {
     try {
-        const [funnelRaw, sources, timelineRaw, costsRaw, posts] = await Promise.all([
+        const [funnelRaw, sources, timelineRaw, costsRaw, posts, channelStats] = await Promise.all([
             fetch('/api/dashboard/funnel').then(r => r.json()),
             fetch('/api/dashboard/sources').then(r => r.json()),
             fetch('/api/dashboard/timeline').then(r => r.json()),
             fetch('/api/dashboard/costs').then(r => r.json()),
             fetch('/api/dashboard/recent_posts').then(r => r.json()),
+            fetch('/api/dashboard/channel_stats').then(r => r.json()),
         ]);
 
         // Трансформация воронки: массив агентов → плоский объект для renderFunnel
@@ -383,7 +414,7 @@ async function loadDashboard() {
             },
         };
 
-        updateStats(funnel, costs, sources);
+        updateStats(funnel, costs, sources, channelStats);
         renderFunnel(funnel);
         renderSources(sources);
         renderReject({ labels: [], counts: [] });

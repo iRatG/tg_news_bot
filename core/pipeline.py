@@ -504,7 +504,7 @@ async def run_arxiv_pipeline(run_id: int) -> None:
     logger.info(f"[pipeline] === ARXIV ПРОГОН #{run_id} НАЧАТ ===")
 
     try:
-        max_papers = int(await get_setting("arxiv_max_papers", "2"))
+        max_papers = int(await get_setting("arxiv_max_papers", "1"))
 
         # ── Шаг 1: Обеспечить наличие источника 'arXiv API' ──────────────────
         async with async_session_factory() as session:

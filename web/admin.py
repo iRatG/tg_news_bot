@@ -246,6 +246,25 @@ admin.add_view(PipelineRunAdmin)
 admin.add_view(AgentLogAdmin)
 admin.add_view(PublishedPostAdmin)
 
+# ── Ссылка на Dashboard в меню sqladmin ──────────────────────────────────────
+
+from sqladmin import BaseView, expose as sqladmin_expose  # noqa: E402
+from starlette.responses import RedirectResponse as _Redirect  # noqa: E402
+
+
+class DashboardLink(BaseView):
+    """Кнопка перехода на Dashboard в боковом меню sqladmin."""
+    name     = "← Dashboard"
+    icon     = "fa-solid fa-gauge-high"
+    identity = "back-to-dashboard"
+
+    @sqladmin_expose("/goto-dashboard", methods=["GET"])
+    async def goto_dashboard(self, request: Request) -> _Redirect:
+        return _Redirect(url="/dashboard")
+
+
+admin.add_base_view(DashboardLink)
+
 
 # ── Dashboard routes ──────────────────────────────────────────────────────────
 
