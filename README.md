@@ -68,15 +68,15 @@ python scripts/init_db.py
 python main.py
 ```
 
-- Admin-панель: http://localhost:8000/admin
-- Dashboard:    http://localhost:8000/dashboard
+- Admin-панель: http://localhost:8010/admin
+- Dashboard:    http://localhost:8010/dashboard
 
 ### Docker
 
 ```bash
 docker build -t newsbot:latest .
 docker run -d --name newsbot \
-  -p 8000:8000 \
+  -p 8010:8010 \
   -v $(pwd)/data:/app/data \
   --env-file .env \
   newsbot:latest

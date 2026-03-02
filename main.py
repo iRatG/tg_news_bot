@@ -42,14 +42,14 @@ async def main() -> None:
     config = uvicorn.Config(
         app=app,
         host="0.0.0.0",
-        port=8000,
+        port=8010,
         log_level="warning",    # uvicorn тихий — наш logger уже настроен
         access_log=False,       # Снижаем шум в логах
         loop="asyncio",
     )
     server = uvicorn.Server(config)
 
-    logger.info("[main] Starting FastAPI on http://0.0.0.0:8000")
+    logger.info("[main] Starting FastAPI on http://0.0.0.0:8010")
     await server.serve()
 
     logger.info("[main] Shutdown complete")

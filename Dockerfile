@@ -28,11 +28,11 @@ ENV PYTHONUNBUFFERED=1 \
     LOG_DIR="/app/logs"
 
 # ── Порт FastAPI ──────────────────────────────────────────────────────────────
-EXPOSE 8000
+EXPOSE 8010
 
 # ── Healthcheck через Python (curl не нужен) ──────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')" || exit 1
 
 # ── Точка входа ───────────────────────────────────────────────────────────────
 CMD ["python", "main.py"]
