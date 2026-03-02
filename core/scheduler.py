@@ -112,6 +112,27 @@ async def _run_channel_stats_snapshot() -> None:
         logger.error(f"[scheduler] Ошибка snapshot подписчиков: {exc}", exc_info=True)
 
 
+async def _run_morning_digest_job() -> None:
+    """
+    Утренний дайджест — отдельный cron-джоб, запускается ежедневно.
+
+    Всегда вызывает run_pipeline(is_morning=True), чтобы пайплайн собрал
+    все кандидаты за ночь и написал один дайджест-пост из нескольких новостей.
+
+    Выделен в отдельный джоб (по аналогии с arxiv_daily), чтобы дайджест
+    гарантированно запускался в morning_digest_hour — независимо от обычных
+    schedule_slots (которые используют is_morning=False).
+    """
+    from core.pipeline import create_pipeline_run, run_pipeline
+
+    try:
+        run_id = await create_pipeline_run()
+        logger.info(f"[scheduler] Запуск утреннего дайджеста #{run_id}")
+        await run_pipeline(run_id, is_morning=True)
+    except Exception as exc:
+        logger.error(f"[scheduler] Ошибка утреннего дайджеста: {exc}", exc_info=True)
+
+
 async def _run_arxiv_job() -> None:
     """
     Точка входа для APScheduler — запускает arXiv пайплайн.
@@ -179,9 +200,32 @@ async def reload_schedule() -> None:
 
     logger.info(f"[scheduler] Расписание загружено: {len(rows)} активных слотов")
 
-    # ── arXiv задача ──────────────────────────────────────────────────────────
+    # ── Утренний дайджест ─────────────────────────────────────────────────────
     from core.config import get_setting
 
+    digest_enabled = (await get_setting("morning_digest_enabled", "true")).lower() == "true"
+    digest_hour    = int(await get_setting("morning_digest_hour", "7"))
+
+    for job in scheduler.get_jobs():
+        if job.id == "morning_digest_daily":
+            job.remove()
+
+    if digest_enabled:
+        scheduler.add_job(
+            func=_run_morning_digest_job,
+            trigger="cron",
+            hour=digest_hour,
+            minute=0,
+            day_of_week="mon-sun",
+            id="morning_digest_daily",
+            replace_existing=True,
+            name=f"Morning digest {digest_hour:02d}:00 MSK",
+        )
+        logger.info(f"[scheduler] Утренний дайджест: ежедневно в {digest_hour:02d}:00 МСК")
+    else:
+        logger.info("[scheduler] Утренний дайджест отключён (morning_digest_enabled=false)")
+
+    # ── arXiv задача ──────────────────────────────────────────────────────────
     arxiv_enabled = (await get_setting("arxiv_schedule_enabled", "true")).lower() == "true"
     arxiv_hour    = int(await get_setting("arxiv_schedule_hour", "18"))
 
