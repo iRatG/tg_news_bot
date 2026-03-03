@@ -358,7 +358,7 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
     # Лимит символов по формату
     max_chars = (
         TELEGRAM_MAX_LONG
-        if post_format in ("longread", "digest")
+        if post_format in ("analysis", "longread", "digest")
         else TELEGRAM_MAX_SINGLE
     )
 
@@ -379,7 +379,7 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
 
     image_enabled = await get_setting("image_enabled", "false")
     can_generate_image = (
-        post_format == "single"
+        post_format in ("brief", "single")
         and image_enabled.lower() == "true"
         and bool(settings.LEONARDO_API_KEY)
     )
@@ -394,7 +394,7 @@ async def format_post(writer_result: WriterResult) -> FormatterResult:
             logger.warning(f"[formatter] Leonardo полностью упал: {exc}")
             image_bytes = None
     else:
-        if post_format in ("longread", "digest"):
+        if post_format in ("analysis", "longread", "digest"):
             logger.debug(f"[formatter] Картинка пропущена (format={post_format})")
         else:
             logger.debug("[formatter] Генерация изображений отключена")
