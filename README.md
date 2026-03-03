@@ -15,7 +15,7 @@
 RSS (11 источников)
     → [Researcher]   парсинг, скоринг, дедупликация
     → [Fact-Checker] верификация через Perplexity (confidence score)
-    → [Writer]       пишет пост в одном из 4 стилей
+    → [Writer]       пишет пост в формате brief или analysis
     → [Formatter]    Telegram HTML, очистка артефактов
     → [Analyst]      финальный контроль + публикация
 ```
@@ -34,9 +34,10 @@ arXiv API (httpx async)
 
 ## Форматы и стили
 
-Три формата постов: **single** (400–600 симв.), **longread** (800–1200 симв.), **digest** (утренний, до 3800 симв.).
-
-Четыре стиля для single/longread: `curator`, `tech_analyst`, `practitioner`, `skeptic` — ротируются автоматически.
+Три формата постов:
+- **brief** — ✔️ короткий новостной бриф, 150–250 симв. Авто-выбор: контент < 800 симв. и нет ключевых слов.
+- **analysis** — 📌 аналитический разбор с секциями 🟡, 1200–1800 симв. Авто-выбор: длинный контент или ключевые слова (research, paper, arxiv, interview…).
+- **digest** — утренний сборник брифов, до 3800 симв.
 
 ---
 
@@ -166,7 +167,7 @@ tg_news_bot/
 ├── agents/
 │   ├── researcher.py    # RSS-парсинг, tier/brand/diversity scoring
 │   ├── fact_checker.py  # верификация через Perplexity sonar
-│   ├── writer.py        # 4 стиля, 3 формата (single/longread/digest)
+│   ├── writer.py        # 2 формата (brief/analysis) + digest, temperature=0.3
 │   ├── formatter.py     # Telegram HTML, очистка, Leonardo AI
 │   ├── analyst.py       # дедупликация, публикация
 │   └── arxiv_agent.py   # arXiv API + Perplexity суммаризация
