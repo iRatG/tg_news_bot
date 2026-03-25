@@ -9,6 +9,7 @@
     - verify_bot_token() — проверка валидности токена (для healthcheck)
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -39,13 +40,34 @@ async def bot_session() -> AsyncGenerator[Bot, None]:
 
     Используется для публикации нескольких постов подряд (arXiv пайплайн)
     чтобы избежать повторного SSL handshake + get_me() на каждый пост.
+
+    Retry до 3 раз при ConnectTimeout — api.telegram.org нестабилен с RU VPS.
     """
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
-    await bot.initialize()
+    last_exc: Exception = RuntimeError("bot_session: не удалось инициализировать")
+    for attempt in range(3):
+        try:
+            await bot.initialize()
+            last_exc = None  # type: ignore[assignment]
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"[publisher] bot.initialize() попытка {attempt + 1}/3: {exc}"
+            )
+            if attempt < 2:
+                await asyncio.sleep(8)
+
+    if last_exc is not None:
+        raise last_exc
+
     try:
         yield bot
     finally:
-        await bot.shutdown()
+        try:
+            await bot.shutdown()
+        except Exception:
+            pass
 
 
 async def send_post(bot: Bot, formatter_result: FormatterResult) -> int:
