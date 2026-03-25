@@ -21,10 +21,10 @@ from core.config import settings
 # Telegram API медленно отвечает с RU VPS (~8-9 сек).
 # Увеличиваем таймауты чтобы избежать Timed out при публикации.
 _TG_REQUEST = HTTPXRequest(
-    connect_timeout=20.0,
-    read_timeout=40.0,
-    write_timeout=30.0,
-    pool_timeout=10.0,
+    connect_timeout=35.0,
+    read_timeout=60.0,
+    write_timeout=40.0,
+    pool_timeout=15.0,
 )
 
 logger = logging.getLogger(__name__)
