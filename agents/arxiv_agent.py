@@ -57,7 +57,7 @@ _GITHUB_RE = re.compile(
 
 _PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 _MODEL = "sonar"
-_MAX_SUMMARY_CHARS = 800
+_MAX_SUMMARY_CHARS = 1200
 
 _SYSTEM_PROMPT = (
     "Ты — научный редактор Telegram-канала об искусственном интеллекте. "
@@ -90,7 +90,7 @@ _SUMMARY_PROMPT = """\
 {abstract}
 
 Требования:
-- Строго до {max_chars} символов
+- До {max_chars} символов
 - Язык: ТОЛЬКО русский. Переводи все термины (см. системный промпт).
   Оставляй по-английски только: LLM, AI, arXiv, API, GitHub, RAG, RLHF, LoRA, MoE, RL
 - Структура:
