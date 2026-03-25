@@ -10,6 +10,8 @@
 """
 
 import logging
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -28,6 +30,47 @@ _TG_REQUEST = HTTPXRequest(
 )
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def bot_session() -> AsyncGenerator[Bot, None]:
+    """
+    Контекст-менеджер: создаёт Bot, инициализирует один раз и держит соединение.
+
+    Используется для публикации нескольких постов подряд (arXiv пайплайн)
+    чтобы избежать повторного SSL handshake + get_me() на каждый пост.
+    """
+    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
+    await bot.initialize()
+    try:
+        yield bot
+    finally:
+        await bot.shutdown()
+
+
+async def send_post(bot: Bot, formatter_result: FormatterResult) -> int:
+    """
+    Публикует пост через уже инициализированный Bot (без get_me()).
+
+    Используется внутри bot_session() для пакетной публикации.
+    """
+    channel = settings.TELEGRAM_CHANNEL_ID
+    if formatter_result.image_bytes is not None:
+        msg = await bot.send_photo(
+            chat_id=channel,
+            photo=formatter_result.image_bytes,
+            caption=formatter_result.formatted_text,
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        msg = await bot.send_message(
+            chat_id=channel,
+            text=formatter_result.formatted_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=False,
+        )
+    logger.info(f"[publisher] Опубликовано: msg_id={msg.message_id} channel={channel}")
+    return msg.message_id
 
 
 async def publish_post(formatter_result: FormatterResult) -> int:
