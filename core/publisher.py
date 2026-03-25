@@ -74,25 +74,38 @@ async def send_post(bot: Bot, formatter_result: FormatterResult) -> int:
     """
     Публикует пост через уже инициализированный Bot (без get_me()).
 
-    Используется внутри bot_session() для пакетной публикации.
+    Retry до 3 раз с 10с задержкой — api.telegram.org нестабилен с RU VPS.
     """
     channel = settings.TELEGRAM_CHANNEL_ID
-    if formatter_result.image_bytes is not None:
-        msg = await bot.send_photo(
-            chat_id=channel,
-            photo=formatter_result.image_bytes,
-            caption=formatter_result.formatted_text,
-            parse_mode=ParseMode.HTML,
-        )
-    else:
-        msg = await bot.send_message(
-            chat_id=channel,
-            text=formatter_result.formatted_text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False,
-        )
-    logger.info(f"[publisher] Опубликовано: msg_id={msg.message_id} channel={channel}")
-    return msg.message_id
+    last_exc: Exception = RuntimeError("send_post: не удалось опубликовать")
+    for attempt in range(3):
+        try:
+            if formatter_result.image_bytes is not None:
+                msg = await bot.send_photo(
+                    chat_id=channel,
+                    photo=formatter_result.image_bytes,
+                    caption=formatter_result.formatted_text,
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                msg = await bot.send_message(
+                    chat_id=channel,
+                    text=formatter_result.formatted_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False,
+                )
+            logger.info(
+                f"[publisher] Опубликовано: msg_id={msg.message_id} channel={channel}"
+            )
+            return msg.message_id
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"[publisher] send_post попытка {attempt + 1}/3: {exc}"
+            )
+            if attempt < 2:
+                await asyncio.sleep(10)
+    raise last_exc
 
 
 async def publish_post(formatter_result: FormatterResult) -> int:

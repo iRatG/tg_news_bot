@@ -57,7 +57,7 @@ _GITHUB_RE = re.compile(
 
 _PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 _MODEL = "sonar"
-_MAX_SUMMARY_CHARS = 1200
+_MAX_SUMMARY_CHARS = 1500
 
 _SYSTEM_PROMPT = (
     "Ты — научный редактор Telegram-канала об искусственном интеллекте. "
@@ -290,7 +290,7 @@ class ArxivAgent:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user",   "content": prompt},
             ],
-            max_tokens=1500,
+            max_tokens=2000,
             temperature=0.7,
             extra_body={"web_search_options": {"search_context_size": "low"}},
         )
