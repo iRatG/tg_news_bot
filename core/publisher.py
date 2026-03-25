@@ -13,9 +13,19 @@ import logging
 
 from telegram import Bot
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 
 from agents.formatter import FormatterResult
 from core.config import settings
+
+# Telegram API медленно отвечает с RU VPS (~8-9 сек).
+# Увеличиваем таймауты чтобы избежать Timed out при публикации.
+_TG_REQUEST = HTTPXRequest(
+    connect_timeout=20.0,
+    read_timeout=40.0,
+    write_timeout=30.0,
+    pool_timeout=10.0,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +47,7 @@ async def publish_post(formatter_result: FormatterResult) -> int:
         telegram.error.TelegramError: при ошибке Bot API.
     """
     channel = settings.TELEGRAM_CHANNEL_ID
-    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
 
     async with bot:
         if formatter_result.image_bytes is not None:
@@ -82,7 +92,7 @@ async def notify_admin(message: str) -> None:
         return
 
     try:
-        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
         async with bot:
             await bot.send_message(
                 chat_id=admin_id,
@@ -104,7 +114,7 @@ async def verify_bot_token() -> bool:
         True если токен валиден и бот активен.
     """
     try:
-        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
         async with bot:
             me = await bot.get_me()
             logger.info(f"[publisher] Bot OK: @{me.username} (id={me.id})")
