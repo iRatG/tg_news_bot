@@ -545,6 +545,25 @@ async def run_arxiv_pipeline(run_id: int) -> None:
             await _finish_run(run_id, 0, 0, 0, RunStatus.COMPLETED_EMPTY)
             return
 
+        # Фильтруем бумаги уже присутствующие в raw_articles через RSS-источник
+        # (arxiv_seen_papers ловит только бумаги из arXiv-пайплайна, не из RSS)
+        arxiv_urls = [p["arxiv_url"] for p in papers]
+        if arxiv_urls:
+            placeholders = ", ".join(f":u{i}" for i in range(len(arxiv_urls)))
+            url_params = {f"u{i}": url for i, url in enumerate(arxiv_urls)}
+            async with async_session_factory() as session:
+                existing_rows = (await session.execute(
+                    text(f"SELECT url FROM raw_articles WHERE url IN ({placeholders})"),
+                    url_params,
+                )).fetchall()
+            existing_urls = {r[0] for r in existing_rows}
+            papers = [p for p in papers if p["arxiv_url"] not in existing_urls]
+            if len(existing_urls) > 0:
+                logger.info(
+                    f"[pipeline] ARXIV: отфильтровано {len(existing_urls)} бумаг "
+                    f"уже в raw_articles (из RSS)"
+                )
+
         published_count = 0
         papers_to_process = papers[:max_papers]
 
