@@ -7,10 +7,10 @@ import sys
 import time
 import paramiko
 
-VPS_HOST  = _env.get("VPS_HOST", "")
-VPS_USER  = _env.get("VPS_USER", "root")
-VPS_PASSWORD = _env.get("VPS_PASSWORD", "")
-REMOTE_DIR = "/opt/tg_news_bot"
+VPS_HOST = os.environ.get("VPS_HOST", "")
+VPS_USER = os.environ.get("VPS_USER", "root")
+VPS_PASSWORD = os.environ.get("VPS_PASSWORD", "")
+REMOTE_DIR = os.environ.get("VPS_REMOTE_DIR", "/opt/tg_news_bot")
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Files/dirs to upload (relative paths)
