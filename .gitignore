@@ -1,5 +1,6 @@
 # Secrets — NEVER commit
 .env
+key_param.txt
 keys.txt
 human_review_task_business.md
 technical_review.md

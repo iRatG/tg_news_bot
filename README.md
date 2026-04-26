@@ -45,25 +45,24 @@ arXiv API (httpx async)
 
 | Слой | Технологии |
 |---|---|
-| AI | Perplexity sonar (OpenAI-совместимый API) |
+| AI | DeepSeek (chat completions) + Perplexity sonar (fact-check, опционально) |
 | Telegram | python-telegram-bot 21.5 |
 | БД | SQLite + SQLAlchemy 2 async + aiosqlite |
 | Web / Admin | FastAPI + sqladmin + Chart.js |
 | Планировщик | APScheduler 3 (cron, SQLite jobstore) |
-| Деплой | Docker + paramiko (scripts/deploy_vps.py) |
+| Деплой | Docker + SSH (paramiko) |
 
-> **Гео-ограничение:** OpenAI, Anthropic, DeepSeek заблокированы с RU VPS.
-> Все AI-вызовы — через Perplexity API (работает глобально).
+> **Гео-ограничение:** OpenAI, Anthropic заблокированы с RU VPS.
+> DeepSeek и Perplexity работают глобально — используем их.
 
 ---
 
-## Быстрый старт
+## Быстрый старт (локально)
 
 ```bash
 git clone https://github.com/iRatG/tg_news_bot.git
 cd tg_news_bot
-cp .env.example .env   # заполнить (см. ниже)
-
+cp .env.example .env   # заполнить обязательные поля
 pip install -r requirements.txt
 python scripts/init_db.py
 python main.py
@@ -72,7 +71,7 @@ python main.py
 - Admin-панель: http://localhost:8010/admin
 - Dashboard:    http://localhost:8010/dashboard
 
-### Docker
+### Docker (локально)
 
 ```bash
 docker build -t newsbot:latest .
@@ -85,14 +84,72 @@ docker run -d --name newsbot \
 
 ---
 
-## Деплой на VPS
+## Деплой на VPS (Ubuntu + Docker)
+
+> Проверено на Ubuntu 24.04, Docker 29.x, порт 8010.
+
+### Шаг 1 — Подготовить .env
+
+Скопировать `.env.example` в `.env` и заполнить:
+- `DEEPSEEK_API_KEY` — обязательно
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `TELEGRAM_ADMIN_CHAT_ID` — обязательно
+- `ADMIN_PASSWORD` — пароль веб-панели (сгенерировать надёжный)
+- `DATABASE_URL=sqlite+aiosqlite:////app/data/newsbot.db` — **4 слеша**, абсолютный путь для Docker
+
+### Шаг 2 — Скопировать код на VPS
 
 ```bash
-# Задать в .env: VPS_HOST / VPS_USER / VPS_PASS / VPS_DEPLOY_PATH
-python scripts/deploy_vps.py
+rsync -az --exclude='.git' --exclude='*.db' --exclude='.env' \
+  ./ root@YOUR_VPS_IP:/opt/tg_news_bot/
+# .env копируем отдельно
+scp .env root@YOUR_VPS_IP:/opt/tg_news_bot/.env
 ```
 
-`git pull → docker build → init_db → migrate → docker run → health check`
+### Шаг 3 — Инициализировать БД (ОБЯЗАТЕЛЬНО перед первым запуском)
+
+```bash
+ssh root@YOUR_VPS_IP
+cd /opt/tg_news_bot
+mkdir -p data logs
+docker build -t newsbot:latest .
+docker run --rm \
+  -v /opt/tg_news_bot/data:/app/data \
+  --env-file .env \
+  newsbot:latest python scripts/init_db.py
+```
+
+### Шаг 4 — Запустить контейнер
+
+```bash
+docker run -d \
+  --name newsbot \
+  --restart unless-stopped \
+  -p 8010:8010 \
+  -v /opt/tg_news_bot/data:/app/data \
+  -v /opt/tg_news_bot/logs:/app/logs \
+  --env-file /opt/tg_news_bot/.env \
+  newsbot:latest
+```
+
+### Проверка
+
+```bash
+docker ps                         # newsbot должен быть Up (healthy)
+docker logs newsbot --tail 20     # scheduler загрузил слоты — всё ок
+curl http://localhost:8010/health
+```
+
+### Обновление кода
+
+```bash
+# Скопировать новый код (rsync, как в шаге 2)
+docker build -t newsbot:latest /opt/tg_news_bot
+docker stop newsbot && docker rm newsbot
+# Повторить шаг 4
+```
+
+> ⚠️ **Важно:** `init_db.py` идемпотентен — безопасно запускать повторно при обновлении.
+> Если добавлены новые таблицы — запусти миграцию из `scripts/migrate_*.py`.
 
 ---
 
@@ -101,8 +158,9 @@ python scripts/deploy_vps.py
 | Время | Режим |
 |---|---|
 | 07:00 | Утренний дайджест (все верифицированные новости за ночь) |
-| 12:00 | Одиночный пост |
-| 16:00 | arXiv (научные статьи) |
+| 09:00 | Одиночный пост |
+| 14:00 | Одиночный пост |
+| 18:00 | arXiv (научные статьи) |
 | 19:00 | Одиночный пост |
 | 00:05 | Snapshot числа подписчиков |
 
@@ -116,13 +174,13 @@ python scripts/deploy_vps.py
 
 ```bash
 # Одиночный прогон
-curl -X POST http://HOST:8000/api/pipeline/run -u "admin:PASSWORD"
+curl -X POST http://HOST:8010/api/pipeline/run -u "admin:PASSWORD"
 
 # Утренний дайджест
-curl -X POST "http://HOST:8000/api/pipeline/run?is_morning=true" -u "admin:PASSWORD"
+curl -X POST "http://HOST:8010/api/pipeline/run?is_morning=true" -u "admin:PASSWORD"
 
 # arXiv прогон
-curl -X POST http://HOST:8000/api/pipeline/run_arxiv -u "admin:PASSWORD"
+curl -X POST http://HOST:8010/api/pipeline/run_arxiv -u "admin:PASSWORD"
 ```
 
 Все вызовы возвращают немедленно: `{"run_id": N, "status": "started"}`.
@@ -133,7 +191,7 @@ curl -X POST http://HOST:8000/api/pipeline/run_arxiv -u "admin:PASSWORD"
 
 ```env
 # AI (обязательно)
-PERPLEXITY_API_KEY=pplx-...
+DEEPSEEK_API_KEY=sk-...
 
 # Telegram (обязательно)
 TELEGRAM_BOT_TOKEN=...
@@ -141,6 +199,8 @@ TELEGRAM_CHANNEL_ID=@channel_name
 TELEGRAM_ADMIN_CHAT_ID=123456789
 
 # База данных
+# Локально: sqlite+aiosqlite:///./data/newsbot.db
+# VPS/Docker: sqlite+aiosqlite:////app/data/newsbot.db  (4 слеша!)
 DATABASE_URL=sqlite+aiosqlite:///./data/newsbot.db
 
 # Admin-панель
@@ -150,12 +210,11 @@ ADMIN_PASSWORD=...
 # VPS деплой
 VPS_HOST=
 VPS_USER=root
-VPS_PASS=
-VPS_DEPLOY_PATH=/opt/tg_news_bot
+VPS_PASSWORD=
 
 # Опционально
-OPENAI_API_KEY=         # семантическая дедупликация (не работает с RU VPS)
-LEONARDO_API_KEY=       # картинки к постам
+PERPLEXITY_API_KEY=      # fact-checking (работает с RU VPS)
+LEONARDO_API_KEY=        # картинки к постам
 ```
 
 ---
@@ -176,20 +235,16 @@ tg_news_bot/
 │   ├── publisher.py     # Telegram Bot API
 │   ├── scheduler.py     # APScheduler cron-задачи
 │   ├── dedup.py         # семантическая дедупликация
-│   └── config.py        # настройки (pydantic-settings)
+│   └── config.py        # настройки
 ├── db/
 │   ├── models.py        # ORM-модели (9 таблиц)
 │   └── database.py      # async engine + session factory
 ├── web/
 │   ├── admin.py         # FastAPI + sqladmin
 │   └── dashboard.py     # Chart.js API + ручной запуск
-├── templates/
-│   ├── base.html
-│   └── dashboard.html
 ├── scripts/
-│   ├── init_db.py       # инициализация БД (idempotent)
-│   ├── deploy_vps.py    # автодеплой через SSH
-│   └── ...              # миграции
+│   ├── init_db.py       # инициализация БД (idempotent, запускать перед первым стартом)
+│   └── migrate_*.py     # миграции схемы
 ├── Dockerfile
 ├── main.py
 └── requirements.txt

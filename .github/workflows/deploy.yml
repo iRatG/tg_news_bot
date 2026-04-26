@@ -10,8 +10,8 @@
 #   VPS_USER          — SSH-пользователь (обычно root или deploy)
 #   VPS_SSH_KEY       — приватный SSH-ключ (id_rsa)
 #   VPS_DEPLOY_PATH   — путь на VPS, напр. /opt/tg_news_bot
-#   OPENAI_API_KEY
-#   PERPLEXITY_API_KEY
+#   DEEPSEEK_API_KEY
+#   PERPLEXITY_API_KEY      (опционально, fact-checking)
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_CHANNEL_ID
 #   TELEGRAM_ADMIN_CHAT_ID
@@ -63,7 +63,7 @@ jobs:
     needs: lint
     if: github.ref == 'refs/heads/main'
     env:
-      OPENAI_API_KEY:          ${{ secrets.OPENAI_API_KEY }}
+      DEEPSEEK_API_KEY:        ${{ secrets.DEEPSEEK_API_KEY }}
       PERPLEXITY_API_KEY:      ${{ secrets.PERPLEXITY_API_KEY }}
       TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHANNEL_ID:     ${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -127,7 +127,7 @@ jobs:
       - name: Write .env on VPS
         run: |
           ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "cat > ${{ env.DEPLOY_PATH }}/.env" << 'ENVEOF'
-          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
           PERPLEXITY_API_KEY=${{ secrets.PERPLEXITY_API_KEY }}
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID=${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -147,6 +147,13 @@ jobs:
           echo "==> Building Docker image..."
           docker build -t newsbot:latest .
 
+          echo "==> Initializing DB (idempotent)..."
+          mkdir -p ${{ env.DEPLOY_PATH }}/data ${{ env.DEPLOY_PATH }}/logs
+          docker run --rm \
+            -v ${{ env.DEPLOY_PATH }}/data:/app/data \
+            --env-file ${{ env.DEPLOY_PATH }}/.env \
+            newsbot:latest python scripts/init_db.py
+
           echo "==> Stopping old container (if running)..."
           docker stop newsbot 2>/dev/null || true
           docker rm   newsbot 2>/dev/null || true
@@ -155,7 +162,7 @@ jobs:
           docker run -d \
             --name newsbot \
             --restart unless-stopped \
-            -p 8000:8000 \
+            -p 8010:8010 \
             -v ${{ env.DEPLOY_PATH }}/data:/app/data \
             -v ${{ env.DEPLOY_PATH }}/logs:/app/logs \
             --env-file ${{ env.DEPLOY_PATH }}/.env \
@@ -165,7 +172,7 @@ jobs:
           sleep 15
 
           echo "==> Checking container health..."
-          curl -f http://localhost:8000/health && echo "  Health OK" || exit 1
+          curl -f http://localhost:8010/health && echo "  Health OK" || exit 1
 
           echo "==> Deploy complete!"
           SSHEOF
