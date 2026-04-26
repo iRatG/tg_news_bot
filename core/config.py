@@ -12,7 +12,15 @@ class Settings:
     # Telegram
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "@workhardatassp")
+    TELEGRAM_CHANNEL_TEST_ID: str = os.getenv("TELEGRAM_CHANNEL_TEST_ID", "")
     TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+
+    @property
+    def active_channel(self) -> str:
+        """Возвращает тестовый канал в development-режиме, иначе — продакшн."""
+        if self.ENVIRONMENT == "development" and self.TELEGRAM_CHANNEL_TEST_ID:
+            return self.TELEGRAM_CHANNEL_TEST_ID
+        return self.TELEGRAM_CHANNEL_ID
 
     # DeepSeek (chat completions + embeddings)
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")

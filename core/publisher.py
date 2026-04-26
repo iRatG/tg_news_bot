@@ -76,7 +76,7 @@ async def send_post(bot: Bot, formatter_result: FormatterResult) -> int:
 
     Retry до 3 раз с 10с задержкой — api.telegram.org нестабилен с RU VPS.
     """
-    channel = settings.TELEGRAM_CHANNEL_ID
+    channel = settings.active_channel
     last_exc: Exception = RuntimeError("send_post: не удалось опубликовать")
     for attempt in range(3):
         try:
@@ -124,7 +124,7 @@ async def publish_post(formatter_result: FormatterResult) -> int:
     Raises:
         telegram.error.TelegramError: при ошибке Bot API.
     """
-    channel = settings.TELEGRAM_CHANNEL_ID
+    channel = settings.active_channel
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
 
     async with bot:

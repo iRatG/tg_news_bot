@@ -181,6 +181,17 @@ async def verify(article: RawArticleCandidate) -> VerificationResult:
     t0 = time.monotonic()
     logger.info(f"[fact_checker] Верификация: {article.title[:70]!r}")
 
+    # --- Bypass для тест-режима ---
+    import os
+    if os.getenv("FACT_CHECK_BYPASS", "").lower() == "true":
+        logger.info("[fact_checker] FACT_CHECK_BYPASS=true — статья одобрена без верификации")
+        return VerificationResult(
+            article_id=article.db_id,
+            verified=True,
+            confidence=1.0,
+            reason="FACT_CHECK_BYPASS=true (тестовый режим)",
+        )
+
     # --- Защита от пустого API-ключа ---
     if not settings.PERPLEXITY_API_KEY:
         logger.warning("[fact_checker] PERPLEXITY_API_KEY не задан — пропуск верификации")
