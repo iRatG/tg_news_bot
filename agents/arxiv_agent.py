@@ -100,7 +100,9 @@ _SUMMARY_PROMPT = """\
   📊 Ключевые результаты и цифры
   💡 Почему это важно / где применимо
 - Не копируй аннотацию дословно — перескажи своими словами
-- Никаких сносок и цитат вида [1][2][3]"""
+- Никаких сносок и цитат вида [1][2][3]
+- ЗАПРЕЩЕНО: markdown-заголовки (# ## ###), жирный (**text**), курсив (*text*)
+- Пиши обычным текстом с эмодзи в начале абзацев"""
 
 
 # ── Агент ─────────────────────────────────────────────────────────────────────
@@ -124,16 +126,36 @@ class ArxivAgent:
     def _strip_artifacts(self, text: str) -> str:
         """
         Убирает артефакты Perplexity из текста:
+        - markdown-заголовки # ## ###
+        - жирный/курсив **text** *text*
         - цитаты вида [1][2][3]
-        - <br> → \\n
+        - <br> → \n
         - все HTML-теги
         - тройные+ переносы строк
         """
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", text)
         text = re.sub(r"\[\d+\]", "", text)
         text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
         text = re.sub(r"<[^>]+>", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+    def _trim_to_limit(self, text: str, limit: int) -> str:
+        """Обрезает текст по границе предложения, не оставляя '...'."""
+        if len(text) <= limit:
+            return text
+        # Ищем последнюю точку/! / ? до лимита
+        cut = text[:limit]
+        for sep in (".", "!", "?"):
+            pos = cut.rfind(sep)
+            if pos > limit // 2:
+                return cut[:pos + 1].strip()
+        # Fallback — по последнему переносу строки
+        pos = cut.rfind("\n")
+        if pos > limit // 2:
+            return cut[:pos].strip()
+        return cut.rstrip(", ;:-").strip()
 
     # ── Получение новых бумаг ─────────────────────────────────────────────────
 
@@ -297,9 +319,7 @@ class ArxivAgent:
 
         summary = response.choices[0].message.content.strip()
         summary = self._strip_artifacts(summary)
-
-        if len(summary) > _MAX_SUMMARY_CHARS:
-            summary = summary[:_MAX_SUMMARY_CHARS - 3] + "..."
+        summary = self._trim_to_limit(summary, _MAX_SUMMARY_CHARS)
 
         in_tok  = response.usage.prompt_tokens     if response.usage else 0
         out_tok = response.usage.completion_tokens if response.usage else 0
