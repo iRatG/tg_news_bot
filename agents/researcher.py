@@ -63,6 +63,7 @@ MAX_RESULTS        = 5   # Максимум кандидатов на выход
 FETCH_WORKERS      = 5   # Потоков для параллельного парсинга
 INSERT_BATCH       = 100 # Размер батча INSERT (обход лимита SQLite в 999 переменных)
 BRAND_CAP          = 2   # Макс. Tier 2/3 статей одного бренда в финальной выборке
+SOURCE_CAP         = 1   # Макс. статей из одного RSS-источника в дайджесте
 
 
 # ── Детекция AI-бренда ────────────────────────────────────────────────────────
@@ -540,9 +541,14 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
 
     # Soft cap: Tier 1 (breakthrough) всегда включается без ограничений.
     # Для Tier 2/3 — не более BRAND_CAP статей одного бренда в финальной выборке.
-    brand_in_result: Dict[str, int] = {}
+    # SOURCE_CAP — не более N статей из одного RSS-источника (разные источники в дайджесте).
+    brand_in_result:  Dict[str, int] = {}
+    source_in_result: Dict[str, int] = {}
     candidates: List[RawArticleCandidate] = []
     for c in scored:
+        src_count = source_in_result.get(c.source_name, 0)
+        if src_count >= SOURCE_CAP:
+            continue
         if c.tier == "breakthrough":
             candidates.append(c)
         else:
@@ -550,6 +556,9 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
             if count < BRAND_CAP:
                 candidates.append(c)
                 brand_in_result[c.brand] = count + 1
+            else:
+                continue
+        source_in_result[c.source_name] = src_count + 1
         if len(candidates) >= MAX_RESULTS:
             break
 

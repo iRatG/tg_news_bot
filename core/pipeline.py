@@ -351,12 +351,18 @@ async def _run_digest(
         else:
             await _set_article_status(candidate.db_id, ArticleStatus.REJECTED)
 
-    if not verified_pairs:
-        logger.warning(f"[pipeline] #{run_id} [digest]: Нет верифицированных статей")
-        elapsed = int((time.monotonic() - t_start) * 1000)
-        await _finish_run(run_id, len(candidates), 0, 0, RunStatus.COMPLETED_EMPTY)
+    DIGEST_MIN_ARTICLES = 3  # минимум статей для публикации дайджеста
+
+    if len(verified_pairs) < DIGEST_MIN_ARTICLES:
+        logger.warning(
+            f"[pipeline] #{run_id} [digest]: только {len(verified_pairs)} статей — "
+            f"нужно минимум {DIGEST_MIN_ARTICLES}. Дайджест не публикуется."
+        )
+        for art, _ in verified_pairs:
+            await _set_article_status(art.db_id, ArticleStatus.NEW)  # вернуть в пул
+        await _finish_run(run_id, len(candidates), verified_count, 0, RunStatus.COMPLETED_EMPTY)
         await notify_admin(
-            f"⚠️ Прогон #{run_id} (дайджест): 0 статей прошло верификацию\n"
+            f"⚠️ Прогон #{run_id} (дайджест): {len(verified_pairs)} из {DIGEST_MIN_ARTICLES} статей — пропущено\n"
             f"Кандидатов: {len(candidates)}\nДетали: /admin → Agent Logs"
         )
         return
