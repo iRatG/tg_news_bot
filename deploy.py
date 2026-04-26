@@ -1,19 +1,24 @@
 """
-Deploy script: upload project files to VPS via SFTP, rebuild Docker container.
-Usage: python deploy.py [--no-rebuild]
+Deploy script: upload Python files to VPS via SFTP + docker cp + restart.
+No Docker rebuild needed for .py-only changes.
+Use --rebuild only when Dockerfile or requirements.txt changed.
+
+Usage:
+    python deploy.py             # fast: sftp + docker cp + restart
+    python deploy.py --rebuild   # full: sftp + docker build + stop/run
 """
 import os
 import sys
 import time
 import paramiko
 
-VPS_HOST = os.environ.get("VPS_HOST", "")
-VPS_USER = os.environ.get("VPS_USER", "root")
-VPS_PASSWORD = os.environ.get("VPS_PASSWORD", "")
-REMOTE_DIR = os.environ.get("VPS_REMOTE_DIR", "/opt/tg_news_bot")
-LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
+VPS_HOST  = _env.get("VPS_HOST", "")
+VPS_USER  = _env.get("VPS_USER", "root")
+VPS_PASSWORD = _env.get("VPS_PASSWORD", "")
+REMOTE_DIR = "/opt/tg_news_bot"
+CONTAINER  = "tg_news_bot"
+LOCAL_DIR  = os.path.dirname(os.path.abspath(__file__))
 
-# Files/dirs to upload (relative paths)
 UPLOAD_PATHS = [
     "agents/researcher.py",
     "agents/arxiv_agent.py",
@@ -27,7 +32,7 @@ UPLOAD_PATHS = [
 ]
 
 
-def connect(retries=5):
+def connect(retries=8):
     for attempt in range(1, retries + 1):
         try:
             client = paramiko.SSHClient()
@@ -36,68 +41,85 @@ def connect(retries=5):
             print(f"[SSH] Connected on attempt {attempt}")
             return client
         except Exception as e:
-            print(f"[SSH] Attempt {attempt} failed: {e}")
+            print(f"[SSH] Attempt {attempt} failed: {type(e).__name__}")
             if attempt < retries:
-                time.sleep(3)
+                time.sleep(4)
     raise RuntimeError("Could not connect to VPS after retries")
 
 
-def upload_files(ssh):
-    sftp = ssh.open_sftp()
-    for rel_path in UPLOAD_PATHS:
-        local_path = os.path.join(LOCAL_DIR, rel_path.replace("/", os.sep))
-        remote_path = f"{REMOTE_DIR}/{rel_path}"
-        # Ensure remote dir exists
-        remote_dir = remote_path.rsplit("/", 1)[0]
-        try:
-            sftp.stat(remote_dir)
-        except FileNotFoundError:
-            sftp.mkdir(remote_dir)
-        sftp.put(local_path, remote_path)
-        print(f"[SFTP] {rel_path} -> {remote_path}")
-    sftp.close()
-
-
-def run(ssh, cmd, desc=""):
-    print(f"[CMD] {desc or cmd}")
-    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=300)
-    out = stdout.read().decode("utf-8", errors="replace")
-    err = stderr.read().decode("utf-8", errors="replace")
-    if out.strip():
-        print(out.strip())
-    if err.strip():
-        print("[STDERR]", err.strip())
+def run(ssh, cmd, desc="", timeout=60):
+    print(f"[CMD] {desc or cmd[:80]}")
+    _, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+    out = stdout.read().decode("utf-8", errors="replace").strip()
+    err = stderr.read().decode("utf-8", errors="replace").strip()
+    if out:
+        print(out)
+    if err:
+        print("[STDERR]", err[:300])
     return out
 
 
-def main():
-    no_rebuild = "--no-rebuild" in sys.argv
+def deploy_fast(ssh):
+    """Upload files via SFTP, copy into running container, restart."""
+    sftp = ssh.open_sftp()
+    for rel_path in UPLOAD_PATHS:
+        local_path  = os.path.join(LOCAL_DIR, rel_path.replace("/", os.sep))
+        remote_path = f"{REMOTE_DIR}/{rel_path}"
+        sftp.put(local_path, remote_path)
+        print(f"[SFTP] {rel_path}")
+    sftp.close()
 
+    # Copy each file directly into the running container
+    for rel_path in UPLOAD_PATHS:
+        run(ssh,
+            f"docker cp {REMOTE_DIR}/{rel_path} {CONTAINER}:/app/{rel_path}",
+            desc=f"docker cp {rel_path}")
+
+    run(ssh, f"docker restart {CONTAINER}", "Restart container", timeout=30)
+    time.sleep(5)
+    run(ssh, f"docker ps | grep {CONTAINER}", "Status")
+
+
+def deploy_rebuild(ssh):
+    """Full rebuild: docker build + stop old containers + run new."""
+    sftp = ssh.open_sftp()
+    for rel_path in UPLOAD_PATHS:
+        local_path  = os.path.join(LOCAL_DIR, rel_path.replace("/", os.sep))
+        remote_path = f"{REMOTE_DIR}/{rel_path}"
+        sftp.put(local_path, remote_path)
+        print(f"[SFTP] {rel_path}")
+    sftp.close()
+
+    run(ssh, f"cd {REMOTE_DIR} && docker build -t {CONTAINER} . 2>&1 | tail -5",
+        "Docker build", timeout=300)
+
+    # Stop only OUR containers — never touch timemirror or other services
+    run(ssh,
+        f"docker stop {CONTAINER} 2>/dev/null; docker rm {CONTAINER} 2>/dev/null; "
+        "docker stop newsbot 2>/dev/null; docker rm newsbot 2>/dev/null; "
+        "echo 'old containers removed'",
+        "Stop old bot containers")
+
+    run(ssh,
+        f"docker run -d --name {CONTAINER} --restart unless-stopped "
+        f"-v {REMOTE_DIR}/data:/app/data "
+        f"--env-file {REMOTE_DIR}/.env "
+        f"-p 8010:8010 {CONTAINER} 2>&1",
+        "Start new container")
+    time.sleep(5)
+    run(ssh, f"docker ps | grep {CONTAINER}", "Status")
+
+
+def main():
+    rebuild = "--rebuild" in sys.argv
     ssh = connect()
     try:
-        upload_files(ssh)
-
-        if not no_rebuild:
-            run(ssh, f"cd {REMOTE_DIR} && docker build -t tg_news_bot . 2>&1 | tail -5", "Docker build")
-            # Stop only OUR containers by known names — never touch other containers
-            run(ssh,
-                "docker stop tg_news_bot 2>/dev/null; docker rm tg_news_bot 2>/dev/null; "
-                "docker stop newsbot 2>/dev/null; docker rm newsbot 2>/dev/null; "
-                "echo 'old containers removed'",
-                "Stop old bot containers")
-            run(ssh,
-                "docker run -d --name tg_news_bot --restart unless-stopped "
-                f"-v {REMOTE_DIR}/data:/app/data "
-                f"--env-file {REMOTE_DIR}/.env "
-                "-p 8010:8010 tg_news_bot 2>&1",
-                "Start new container")
-            time.sleep(3)
-            run(ssh, "docker ps | grep tg_news_bot", "Check container running")
+        if rebuild:
+            print("[DEPLOY] Full rebuild mode")
+            deploy_rebuild(ssh)
         else:
-            run(ssh, "docker restart tg_news_bot", "Restart container")
-            time.sleep(3)
-            run(ssh, "docker ps | grep tg_news_bot", "Check container running")
-
+            print("[DEPLOY] Fast mode (docker cp + restart)")
+            deploy_fast(ssh)
     finally:
         ssh.close()
     print("[DEPLOY] Done.")
