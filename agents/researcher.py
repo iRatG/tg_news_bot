@@ -420,17 +420,25 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
     #    Фильтр по fetched_at отсекает зависшие старые статьи, которые никогда
     #    не пройдут скоринг без бонуса за свежесть.
     #    fetched_at включён в SELECT — используется как proxy published_at.
+    # Берём не более 20 статей от каждого источника, чтобы HuggingFace (758 статей)
+    # не вытеснял все остальные источники из пула кандидатов.
     async with async_session_factory() as session:
         pool_rows = (await session.execute(
             text("""
-                SELECT ra.id, ra.title, ra.url, ra.content,
-                       s.name, s.url, s.category, ra.fetched_at
-                FROM raw_articles ra
-                JOIN sources s ON ra.source_id = s.id
-                WHERE ra.status = :status
-                  AND ra.fetched_at > datetime('now', '-7 days')
-                ORDER BY ra.fetched_at DESC
-                LIMIT 200
+                SELECT id, title, url, content, src_name, src_url, category, fetched_at
+                FROM (
+                    SELECT ra.id, ra.title, ra.url, ra.content,
+                           s.name AS src_name, s.url AS src_url, s.category, ra.fetched_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ra.source_id ORDER BY ra.fetched_at DESC
+                           ) AS rn
+                    FROM raw_articles ra
+                    JOIN sources s ON ra.source_id = s.id
+                    WHERE ra.status = :status
+                      AND ra.fetched_at > datetime('now', '-7 days')
+                )
+                WHERE rn <= 20
+                ORDER BY fetched_at DESC
             """),
             {"status": ArticleStatus.NEW},
         )).fetchall()

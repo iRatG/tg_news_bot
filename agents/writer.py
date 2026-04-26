@@ -334,7 +334,7 @@ async def write_post(
     if post_format == "analysis":
         system_prompt   = SYSTEM_ANALYSIS
         user_prompt     = _build_analysis_prompt(article)
-        max_tokens      = 950
+        max_tokens      = 1400
         search_context  = "medium"
     else:
         system_prompt   = SYSTEM_BRIEF

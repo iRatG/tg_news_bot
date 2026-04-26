@@ -134,7 +134,7 @@ async def _format_html(post_text: str) -> tuple[str, int, int]:
             {"role": "user",   "content": _format_prompt(post_text)},
         ],
         temperature=0.1,
-        max_tokens=800,
+        max_tokens=1500,
         extra_body={
             # Formatter только добавляет HTML-теги, веб-поиск не нужен
             "web_search_options": {"search_context_size": "low"},
@@ -206,15 +206,23 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
         if opens > closes:
             text += "</b>" * (opens - closes)
 
-    # Жёсткий лимит
+    # Жёсткий лимит — обрезаем по последнему закрытому HTML-тегу
     if len(text) > max_chars:
         logger.warning(
             f"[formatter] Текст {len(text)} симв. > {max_chars} — обрезаю"
         )
-        text = text[:max_chars]
-        last_space = text.rfind(" ")
-        if last_space > max_chars - 50:
-            text = text[:last_space]
+        cut = text[:max_chars]
+        # Убеждаемся, что не обрываем внутри HTML-тега (нет незакрытого <...)
+        last_gt = cut.rfind(">")
+        last_lt = cut.rfind("<")
+        if last_lt > last_gt:
+            # Незакрытый тег — откатываемся до предыдущего закрытого тега
+            cut = cut[:last_lt]
+        last_space = cut.rfind(" ")
+        if last_space > len(cut) - 50:
+            text = cut[:last_space]
+        else:
+            text = cut
 
     return text
 
