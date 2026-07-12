@@ -206,6 +206,24 @@ _ANALYSIS_KEYWORDS = {
 }
 
 
+def _ensure_source_link(post_text: str, url: str, source_name: str) -> str:
+    """
+    Гарантирует наличие ссылки на источник в посте.
+
+    Perplexity периодически игнорирует инструкцию вставить <a href>, и тогда
+    Analyst отбрасывает уже готовый пост ('отсутствует ссылка на источник') —
+    впустую сгорает весь пайплайн (fact-check + writer + formatter токены).
+    URL всегда известен, поэтому дописываем ссылку детерминированно.
+    """
+    if "http" in post_text:
+        return post_text
+    url = (url or "").strip()
+    if not url:
+        return post_text  # нечего вставлять — пусть решает Analyst
+    label = source_name or "Источник"
+    return post_text.rstrip() + f'\n\n🔗 <a href="{url}">{label}</a>'
+
+
 def _detect_post_format(article: RawArticleCandidate) -> str:
     """
     Определяет формат поста: 'brief' или 'analysis'.
@@ -352,6 +370,12 @@ async def write_post(
         logger.error(f"[writer] Ошибка Perplexity API: {exc}")
         raise
 
+    # Страховка: если модель не вставила ссылку — дописываем детерминированно,
+    # чтобы Analyst не отбросил готовый пост из-за отсутствия <a href>.
+    if "http" not in post_text:
+        logger.warning("[writer] Ссылка не найдена — вставляю источник детерминированно")
+        post_text = _ensure_source_link(post_text, article.url, article.source_name)
+
     latency    = int((time.monotonic() - t0) * 1000)
     char_count = len(post_text)
 
@@ -362,9 +386,6 @@ async def write_post(
         logger.warning(f"[writer] Бриф длинноват: {char_count} симв.")
     elif post_format == "analysis" and char_count > MAX_ANALYSIS_CHARS:
         logger.warning(f"[writer] Аналитика длинновата: {char_count} симв. — Formatter обрежет")
-
-    if "http" not in post_text:
-        logger.warning("[writer] В посте не найдена ссылка на источник")
 
     logger.info(
         f"[writer] OK: format={post_format} "
@@ -416,11 +437,15 @@ async def write_digest(
         logger.error(f"[writer] Ошибка Perplexity API (дайджест): {exc}")
         raise
 
+    # Страховка: дайджест без единой ссылки — дописываем ссылку primary-статьи.
+    if "http" not in post_text:
+        logger.warning("[writer] В дайджесте нет ссылок — вставляю primary-источник")
+        post_text = _ensure_source_link(
+            post_text, primary_article.url, primary_article.source_name
+        )
+
     latency    = int((time.monotonic() - t0) * 1000)
     char_count = len(post_text)
-
-    if "http" not in post_text:
-        logger.warning("[writer] В дайджесте не найдены ссылки на источники")
 
     logger.info(
         f"[writer] Дайджест OK: {n} новостей | {char_count} симв. | "

@@ -161,6 +161,74 @@ _VALID_TG_TAG = re.compile(
     re.IGNORECASE,
 )
 
+# Парные Telegram-теги, которые балансируем через стек.
+_TG_PAIRED = {
+    "b", "i", "u", "s", "code", "pre",
+    "strong", "em", "del", "strike", "tg-spoiler", "a",
+}
+
+# Одиночный HTML-тег (открывающий или закрывающий), с возможными атрибутами.
+_ANY_TAG = re.compile(r'<(/?)([a-zA-Z][a-zA-Z0-9-]*)(?:\s[^>]*)?>')
+
+# Запас символов под закрывающие теги, дописываемые балансировщиком после обрезки.
+# Иначе итоговая длина может превысить лимит Telegram (и Analyst отбросит пост).
+_BALANCE_RESERVE = 40
+
+
+def _balance_tags(text: str) -> str:
+    """
+    Балансирует парные Telegram-теги через стек.
+
+    Telegram Bot API возвращает ошибку при любом непарном теге:
+      • «unclosed start tag» / «can't find end tag» — незакрытый <b>/<a>/<i>
+      • «unmatched end tag» — лишний закрывающий тег
+
+    Алгоритм:
+      • открывающий парный тег → кладём в стек, оставляем в тексте;
+      • закрывающий тег top-of-stack → снимаем со стека, оставляем;
+      • закрывающий тег глубже в стеке → закрываем промежуточные, затем его;
+      • лишний закрывающий тег (нет пары) → удаляем;
+      • оставшиеся в стеке открытые теги → закрываем в конце.
+    Непарные/неизвестные теги не трогаем (их уже отфильтровал whitelist).
+    """
+    stack: list[str] = []
+    out: list[str] = []
+    pos = 0
+
+    for m in _ANY_TAG.finditer(text):
+        out.append(text[pos:m.start()])
+        pos = m.end()
+        is_close = m.group(1) == "/"
+        name = m.group(2).lower()
+
+        if name not in _TG_PAIRED:
+            out.append(m.group(0))          # не парный — оставляем как есть
+            continue
+
+        if not is_close:
+            stack.append(name)
+            out.append(m.group(0))
+            continue
+
+        # Закрывающий парный тег
+        if name not in stack:
+            continue                        # лишний </...> — выкидываем
+        # Закрываем промежуточные незакрытые теги (нарушенная вложенность)
+        while stack and stack[-1] != name:
+            out.append(f"</{stack.pop()}>")
+        if stack:                           # снимаем сам тег
+            stack.pop()
+            out.append(m.group(0))
+
+    out.append(text[pos:])
+    result = "".join(out)
+
+    # Закрываем всё, что осталось открытым, в обратном порядке
+    for name in reversed(stack):
+        result += f"</{name}>"
+
+    return result
+
 
 def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     """
@@ -198,20 +266,14 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
         logger.warning("[formatter] Catch-all: удалены нераспознанные HTML-конструкции")
     text = catch_cleaned
 
-    # Баланс тега <b>
-    if text.count("<b>") != text.count("</b>"):
-        logger.warning("[formatter] Дисбаланс тегов <b> — исправляю")
-        opens  = text.count("<b>")
-        closes = text.count("</b>")
-        if opens > closes:
-            text += "</b>" * (opens - closes)
-
-    # Жёсткий лимит — обрезаем по последнему закрытому HTML-тегу
-    if len(text) > max_chars:
+    # Жёсткий лимит — обрезаем ДО балансировки, оставляя запас под закрывающие теги,
+    # чтобы дописанные </b></a> не вытолкнули текст за лимит Telegram.
+    limit = max_chars - _BALANCE_RESERVE
+    if len(text) > limit:
         logger.warning(
             f"[formatter] Текст {len(text)} симв. > {max_chars} — обрезаю"
         )
-        cut = text[:max_chars]
+        cut = text[:limit]
         # Убеждаемся, что не обрываем внутри HTML-тега (нет незакрытого <...)
         last_gt = cut.rfind(">")
         last_lt = cut.rfind("<")
@@ -223,6 +285,13 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
             text = cut[:last_space]
         else:
             text = cut
+
+    # Балансировка всех парных тегов — последним шагом, уже после обрезки:
+    # закрывает незакрытые <b>/<i>/<a> и удаляет лишние закрывающие теги.
+    balanced = _balance_tags(text)
+    if balanced != text:
+        logger.warning("[formatter] Исправлен дисбаланс HTML-тегов")
+    text = balanced
 
     return text
 
