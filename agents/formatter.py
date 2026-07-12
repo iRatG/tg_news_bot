@@ -266,6 +266,16 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
         logger.warning("[formatter] Catch-all: удалены нераспознанные HTML-конструкции")
     text = catch_cleaned
 
+    # Незавершённый «хвостовой» тег без закрывающего '>' — так Perplexity обрывает
+    # ответ на max_tokens прямо внутри <a href="...  Ни catch-all, ни балансировщик
+    # его не ловят (обе регулярки требуют '>'), а Telegram падает с «unclosed start tag».
+    # Удаляем только конструкцию, похожую на тег ('<' + опц. '/' + буква), чтобы не
+    # затронуть текстовые '<' вроде «5 < 10».
+    trimmed = re.sub(r'</?[a-zA-Z][^<>]*$', '', text)
+    if trimmed != text:
+        logger.warning("[formatter] Удалён незавершённый HTML-тег в конце текста")
+    text = trimmed
+
     # Жёсткий лимит — обрезаем ДО балансировки, оставляя запас под закрывающие теги,
     # чтобы дописанные </b></a> не вытолкнули текст за лимит Telegram.
     limit = max_chars - _BALANCE_RESERVE
