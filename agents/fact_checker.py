@@ -236,18 +236,17 @@ async def verify(article: RawArticleCandidate) -> VerificationResult:
     output_tokens    = int(data.get("_output_tokens", 0))
 
     # --- Правила отклонения (порядок важен) ---
+    # ПРИМЕЧАНИЕ: is_duplicate_topic намеренно НЕ используется для отклонения.
+    # Perplexity оценивает его как "эта новость уже растиражирована другими СМИ",
+    # а не "мы уже публиковали это в своём канале" — под таким определением
+    # почти любая заметная новость помечается дубликатом (94 из 105 отказов за
+    # неделю были именно по этой причине). Реальная дедупликация против нашей
+    # истории публикаций — зона ответственности analyst.py (core/dedup.py).
+    # Оставляем флаг только в логах для наблюдаемости.
     if is_dup:
-        reason = "Дубликат темы (is_duplicate_topic=true)"
-        logger.warning(f"[fact_checker] REJECT: {reason}")
-        return VerificationResult(
-            article_id=article.db_id,
-            verified=False,
-            confidence=confidence,
-            reason=reason,
-            sources=sources,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            latency_ms=latency,
+        logger.info(
+            f"[fact_checker] is_duplicate_topic=true (не влияет на verified): "
+            f"{article.title[:70]!r}"
         )
 
     if confidence < MIN_CONFIDENCE:

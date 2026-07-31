@@ -682,7 +682,7 @@ async def run_arxiv_pipeline(run_id: int) -> None:
                             "article_id": article_id,
                             "run_id":     run_id,
                             "msg_id":     msg_id,
-                            "channel_id": settings.TELEGRAM_CHANNEL_ID,
+                            "channel_id": settings.active_channel,
                             "post_text":  post_html,
                             "source_url": paper["arxiv_url"],
                         },

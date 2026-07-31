@@ -365,7 +365,7 @@ class ArxivAgent:
             f"👥 {authors_str}",
             f"📅 {paper['published']} | 📂 {cats_str}",
             "",
-            summary,
+            html.escape(summary),
             "",
             f"🔗 <a href=\"{html.escape(paper['arxiv_url'])}\">arXiv</a>",
         ]

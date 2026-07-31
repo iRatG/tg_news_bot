@@ -170,9 +170,89 @@ _TG_PAIRED = {
 # Одиночный HTML-тег (открывающий или закрывающий), с возможными атрибутами.
 _ANY_TAG = re.compile(r'<(/?)([a-zA-Z][a-zA-Z0-9-]*)(?:\s[^>]*)?>')
 
+# Те же валидные Telegram-теги, но для поиска по всему тексту (не anchored ^...$),
+# используется чтобы не экранировать реальные теги при экранировании "голых" &/</>.
+_VALID_TAG_SCAN = re.compile(
+    r'</?(?:b|i|u|s|code|pre|strong|em|del|strike|tg-spoiler)>'
+    r'|<a(?:\s[^<>]*)?>'
+    r'|</a>',
+    re.IGNORECASE,
+)
+
+# Уже валидная HTML-сущность — не трогаем повторным экранированием.
+_HTML_ENTITY = re.compile(r'&(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);', re.IGNORECASE)
+
+
+def _escape_plain_text(segment: str) -> str:
+    """Экранирует '&', '<', '>' в куске текста, не содержащем реальных тегов."""
+    segment = _HTML_ENTITY.sub(lambda m: m.group(0).replace('&', '\x00'), segment)
+    segment = segment.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return segment.replace('\x00', '&')
+
+
+def _escape_stray_chars(text: str) -> str:
+    """
+    Экранирует одиночные '&', '<', '>', не входящие в распознанный Telegram-тег
+    или уже валидную HTML-сущность.
+
+    Без этого шага обычная лексика AI-новостей (R&D, AT&T, Q&A, <100ms,
+    accuracy >90%) приводит к ошибке Telegram Bot API «Can't parse entities» —
+    catch-all выше удаляет только конструкции вида <тег>, где есть и открывающая,
+    и закрывающая скобка в пределах 200 символов; одиночный непарный '<' или '>'
+    (как в «p<0.001» — подтверждённый инцидент в arxiv_agent) он не ловит.
+    """
+    out: list[str] = []
+    pos = 0
+    for m in _VALID_TAG_SCAN.finditer(text):
+        out.append(_escape_plain_text(text[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_escape_plain_text(text[pos:]))
+    return "".join(out)
+
 # Запас символов под закрывающие теги, дописываемые балансировщиком после обрезки.
 # Иначе итоговая длина может превысить лимит Telegram (и Analyst отбросит пост).
 _BALANCE_RESERVE = 40
+
+# Структурные маркеры постов (brief/analysis/digest) — перед каждым, кроме
+# самого первого в тексте, должен быть перенос строки (пустая строка).
+# Perplexity не всегда следует инструкции "каждый блок с новой строки" — иногда
+# склеивает все секции в один абзац (подтверждено на живом посте). Telegram не
+# схлопывает переносы как HTML, поэтому без этого пост выглядит нечитаемой стеной текста.
+_STRUCTURE_MARKERS = ("📌", "🟡", "🔗", "✔️")
+# (?<!<b>) и (?<!<strong>) — маркер иногда попадает ВНУТРЬ жирного заголовка
+# (<b>📌 Заголовок</b>), в этом случае перенос перед ним не нужен: это начало
+# блока, а не склейка с предыдущим текстом.
+_MISSING_BREAK_BEFORE_MARKER = re.compile(
+    r'(?<!^)(?<!<b>)(?<!<strong>)[ \t]*\n?[ \t]*(?=' + '|'.join(_STRUCTURE_MARKERS) + ')'
+)
+
+
+def _ensure_line_breaks(text: str) -> str:
+    """Гарантирует пустую строку перед каждым структурным маркером поста."""
+    text = _MISSING_BREAK_BEFORE_MARKER.sub('\n\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+# Вложенные одинаковые парные теги: <b>текст<b>ещё</b></b> → <b>текст ещё</b>.
+# Writer уже пишет теги сам, Formatter добавляет их вторым LLM-проходом поверх —
+# иногда оборачивает уже жирный заголовок ещё раз (подтверждено на живом посте).
+# Оба тега по отдельности валидны и сбалансированы, поэтому _balance_tags их
+# не трогает — нужен отдельный проход.
+_NESTED_SAME_TAG = re.compile(
+    r'<(b|i|u|s|strong|em|del|strike)>([^<]*)<\1>((?:(?!</?\1>).)*)</\1></\1>',
+    re.IGNORECASE,
+)
+
+
+def _collapse_nested_tags(text: str) -> str:
+    """Схлопывает вложенные одинаковые теги в один (повторяет проход до неподвижной точки)."""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _NESTED_SAME_TAG.sub(r'<\1>\2\3</\1>', text)
+    return text
 
 
 def _balance_tags(text: str) -> str:
@@ -249,6 +329,13 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     # <br> → перенос строки
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
 
+    # Гарантируем перенос строки перед каждым структурным маркером (📌/🟡/🔗/✔️),
+    # даже если модель слепила все секции в один абзац.
+    fixed_breaks = _ensure_line_breaks(text)
+    if fixed_breaks != text:
+        logger.warning("[formatter] Добавлены переносы строк перед структурными маркерами")
+    text = fixed_breaks
+
     # Удаляем известные неподдерживаемые структурные теги
     cleaned = _UNSUPPORTED_TAGS.sub('', text)
     if cleaned != text:
@@ -276,6 +363,13 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
         logger.warning("[formatter] Удалён незавершённый HTML-тег в конце текста")
     text = trimmed
 
+    # Экранируем одиночные &/</>, оставшиеся вне распознанных тегов — иначе
+    # обычная лексика («R&D», «<100ms», «accuracy >90%») валит отправку в Telegram.
+    escaped = _escape_stray_chars(text)
+    if escaped != text:
+        logger.warning("[formatter] Экранированы одиночные HTML-спецсимволы (&/</>) вне тегов")
+    text = escaped
+
     # Жёсткий лимит — обрезаем ДО балансировки, оставляя запас под закрывающие теги,
     # чтобы дописанные </b></a> не вытолкнули текст за лимит Telegram.
     limit = max_chars - _BALANCE_RESERVE
@@ -302,6 +396,11 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
     if balanced != text:
         logger.warning("[formatter] Исправлен дисбаланс HTML-тегов")
     text = balanced
+
+    collapsed = _collapse_nested_tags(text)
+    if collapsed != text:
+        logger.warning("[formatter] Схлопнуты вложенные одинаковые HTML-теги")
+    text = collapsed
 
     return text
 

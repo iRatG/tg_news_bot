@@ -58,7 +58,6 @@ DEFAULT_SETTINGS = [
     ("posts_per_day",       "3",                     "Number of posts published per day"),
     ("max_candidates",      "5",                     "Max RSS candidates evaluated per pipeline run"),
     ("min_fact_check_conf", "0.65",                  "Minimum Perplexity confidence score to pass fact-check"),
-    ("dedup_threshold",     "0.80",                  "Cosine similarity threshold for semantic deduplication"),
     ("dedup_lookback_days", "30",                    "Days to look back when checking for duplicate topics"),
     ("language",            "ru",                    "Post language"),
     ("image_enabled",       "false",                 "Enable Leonardo AI image generation (true/false)"),

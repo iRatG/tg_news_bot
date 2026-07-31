@@ -2,17 +2,17 @@
 Агент 5 — Analyst / Publisher.
 
 Финальный gate-keeper пайплайна: проверяет качество, выполняет
-семантическую дедупликацию и принимает решение о публикации.
+дедупликацию против нашей истории публикаций и принимает решение о публикации.
 
 Алгоритм (fail-fast, порядок проверок важен):
     1. Целостность пайплайна — все предыдущие агенты отработали.
     2. Качество контента — длина, наличие URL, эмодзи.
-    3. Семантическая дедупликация — cosine similarity < порога из settings.
+    3. Дедупликация — LLM-сравнение (DeepSeek) с последними опубликованными
+       заголовками (core/dedup.py).
     4. Жёсткая URL-дедупликация — страховка от точных дубликатов.
-    5. Публикация в Telegram + сохранение embedding + запись в published_posts.
+    5. Публикация в Telegram + запись в published_posts.
 
 Если 0 публикаций за прогон — уведомляет администратора.
-Стоимость: ~$0.001/месяц (только embeddings при проверке дедупликации).
 """
 
 import logging
@@ -27,7 +27,7 @@ from agents.formatter import FormatterResult
 from agents.researcher import RawArticleCandidate
 from agents.writer import WriterResult
 from core.config import get_setting, settings
-from core.dedup import check_similarity, save_embedding
+from core.dedup import check_duplicate
 from core.publisher import notify_admin, publish_post
 from db.database import async_session_factory
 from db.models import ArticleStatus
@@ -87,7 +87,7 @@ async def _save_published_post(
                 "article_id":      article.db_id,
                 "run_id":          run_id,
                 "telegram_msg_id": telegram_msg_id,
-                "channel_id":      settings.TELEGRAM_CHANNEL_ID,
+                "channel_id":      settings.active_channel,
                 "post_text":       formatter_result.formatted_text,
                 "source_url":      article.url,
                 "source_name":     article.source_name,
@@ -120,7 +120,7 @@ async def evaluate_and_publish(
     Финальная проверка и публикация поста.
 
     Применяет все качественные и дедупликационные проверки.
-    При успехе: публикует в Telegram, сохраняет embedding, обновляет БД.
+    При успехе: публикует в Telegram, обновляет БД.
     При отказе: помечает статью как REJECTED, логирует причину.
 
     Args:
@@ -167,15 +167,13 @@ async def evaluate_and_publish(
         logger.warning(f"[analyst] REJECT (quality): {reason}")
         return AnalystResult(article_id=article.db_id, published=False, reason=reason)
 
-    # ── Проверка 3: Семантическая дедупликация ────────────────────────────────
-    dedup_threshold = float(await get_setting("dedup_threshold", "0.80"))
-    lookback_days   = int(await get_setting("dedup_lookback_days", "30"))
+    # ── Проверка 3: Дедупликация против нашей истории публикаций ──────────────
+    lookback_days = int(await get_setting("dedup_lookback_days", "30"))
 
-    dedup_text  = f"{article.title} {article.content[:200]}"
-    similarity  = await check_similarity(dedup_text, lookback_days=lookback_days)
+    is_dup, matched_title = await check_duplicate(article.title, lookback_days=lookback_days)
 
-    if similarity >= dedup_threshold:
-        reason = f"Семантический дубликат: similarity={similarity:.3f} >= {dedup_threshold}"
+    if is_dup:
+        reason = f"Дубликат уже опубликованного: «{matched_title}»"
         await _set_article_status(article.db_id, ArticleStatus.REJECTED)
         logger.warning(f"[analyst] REJECT (dedup): {reason}")
         return AnalystResult(article_id=article.db_id, published=False, reason=reason)
@@ -189,8 +187,7 @@ async def evaluate_and_publish(
 
     # ── Публикация ────────────────────────────────────────────────────────────
     logger.info(
-        f"[analyst] Все проверки пройдены. "
-        f"similarity={similarity:.3f} | Публикуем в {settings.TELEGRAM_CHANNEL_ID}..."
+        f"[analyst] Все проверки пройдены. Публикуем в {settings.active_channel}..."
     )
 
     try:
@@ -204,9 +201,6 @@ async def evaluate_and_publish(
     # ── Пост-публикация: сохраняем данные ────────────────────────────────────
     await _set_article_status(article.db_id, ArticleStatus.PUBLISHED)
     await _save_published_post(article, formatter_result, run_id, telegram_msg_id)
-
-    # Сохраняем embedding для будущей дедупликации
-    await save_embedding(article.db_id, dedup_text)
 
     latency = int((time.monotonic() - t0) * 1000)
     logger.info(

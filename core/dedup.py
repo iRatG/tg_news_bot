@@ -1,27 +1,31 @@
 """
-Семантическая дедупликация статей.
+Дедупликация статей против нашей истории публикаций.
 
-Использует DeepSeek embeddings API для генерации векторов
-и косинусное сходство для обнаружения дубликатов по смыслу.
+DeepSeek не предоставляет embeddings API (подтверждено официальной
+документацией и живым тест-вызовом: 404 NotFoundError на /embeddings,
+при том что chat completions с того же сервера отвечают нормально) —
+поэтому вместо векторного сходства используется прямое LLM-сравнение
+через deepseek-v4-flash chat completion.
 
 Алгоритм:
-    1. Генерируем embedding для текста новой статьи (title + content[:512]).
-    2. Загружаем векторы опубликованных статей за последние N дней (макс. 200).
-    3. Вычисляем максимальное косинусное сходство через numpy.
-    4. Если max_sim > порога — статья считается дубликатом.
-    5. После публикации вызываем save_embedding() для сохранения вектора.
+    1. Загружаем последние N заголовков ОПУБЛИКОВАННЫХ нами статей
+       за lookback_days дней.
+    2. Просим модель явно определить (субъект, событие) кандидата и
+       лучшего совпадения из списка, затем формально сравнить:
+       дубликат ⇔ совпадают И субъект, И событие.
+    3. thinking-режим модели отключён явно (extra_body) — структурированные
+       промежуточные поля в самой JSON-схеме ответа заменяют его, сохраняя
+       точность при значительно меньшем расходе токенов (проверено на
+       живых данных: 4/4 тестовых кейса, включая заведомо неоднозначный).
 
-Примечание: DeepSeek embeddings API (если недоступен) — возвращает 0.0 gracefully,
-только URL-based dedup продолжает работать.
-
-RAM: 200 векторов × 1536 dim × 4 байта ≈ 1.2 MB — безопасно для 1GB VPS.
+Если DEEPSEEK_API_KEY не задан или вызов API падает — считаем "не дубликат"
+(graceful skip), чтобы сбой проверки не блокировал публикацию.
 """
 
 import json
 import logging
-from typing import List, Optional
+from typing import List, Tuple
 
-import numpy as np
 import openai
 from sqlalchemy import text
 
@@ -32,163 +36,126 @@ logger = logging.getLogger(__name__)
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 
-EMBEDDING_MODEL    = "deepseek-chat"   # DeepSeek не публикует отдельную модель embeddings — возвращает 0.0 gracefully
-EMBEDDING_DIMS     = 1536
-MAX_INPUT_CHARS    = 512   # Ограничиваем вход для экономии токенов
-MAX_VECTORS_LOADED = 200   # Защита памяти на 1GB VPS
+MODEL              = "deepseek-v4-flash"
+MAX_PUBLISHED      = 30    # сколько последних заголовков даём модели на сравнение
+MAX_TOKENS         = 400   # с запасом; фактический расход ~100-115 (thinking отключён)
 
 
-# ── Внутренние утилиты ────────────────────────────────────────────────────────
+# ── Промпт ────────────────────────────────────────────────────────────────────
+
+_SYSTEM_PROMPT = (
+    "Ты — модуль дедупликации новостного Telegram-канала об ИИ. "
+    "Сравни НОВУЮ статью-кандидата со списком уже ОПУБЛИКОВАННЫХ нами заголовков.\n"
+    "\n"
+    "Правило дедупликации (строго формальное, применяй буквально):\n"
+    "Два заголовка — дубликат ТОЛЬКО если СОВПАДАЮТ ОБА признака:\n"
+    "  1) ГЛАВНЫЙ СУБЪЕКТ — та же компания/организация/модель, о которой новость.\n"
+    "  2) СОБЫТИЕ — то же самое конкретное действие/происшествие/релиз "
+    "(не просто общая тема, а именно один и тот же факт).\n"
+    "Если хотя бы один из двух признаков отличается — это НЕ дубликат, "
+    "даже если тема выглядит похожей.\n"
+    "НЕ считай дубликатом то, что просто 'уже писали в интернете' — сравнивай "
+    "ТОЛЬКО со списком публикаций ниже.\n"
+    "\n"
+    "Сначала явно укажи субъект и событие кандидата и лучшего кандидата на совпадение "
+    "из списка, ПОТОМ дай вердикт — так меньше шанс ошибиться.\n"
+    "\n"
+    "Отвечай СТРОГО JSON без текста вокруг, в этом порядке ключей:\n"
+    '{"candidate_subject": "...", "candidate_event": "...", '
+    '"best_match_title": "заголовок из списка или null", '
+    '"best_match_subject": "... или null", "best_match_event": "... или null", '
+    '"same_subject": true/false, "same_event": true/false, '
+    '"is_duplicate": true/false}'
+)
+
+
+def _build_user_prompt(candidate_title: str, published_titles: List[str]) -> str:
+    pub_list = "\n".join(f"- {t}" for t in published_titles)
+    return f"Уже опубликованные заголовки:\n{pub_list}\n\nНовый кандидат:\n{candidate_title}"
+
 
 def _get_client() -> openai.AsyncOpenAI:
-    """Создаёт асинхронный DeepSeek-клиент (OpenAI-совместимый) для работы с embeddings."""
+    """Создаёт асинхронный DeepSeek-клиент (OpenAI-совместимый)."""
     return openai.AsyncOpenAI(
         api_key=settings.DEEPSEEK_API_KEY,
         base_url="https://api.deepseek.com",
     )
 
 
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """
-    Вычисляет косинусное сходство между двумя векторами.
-
-    Returns:
-        Значение от 0.0 (полная разница) до 1.0 (идентичные векторы).
-    """
-    va = np.array(a, dtype=np.float32)
-    vb = np.array(b, dtype=np.float32)
-    norm_a = np.linalg.norm(va)
-    norm_b = np.linalg.norm(vb)
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return float(np.dot(va, vb) / (norm_a * norm_b))
-
-
-async def _generate_embedding(text_input: str) -> Optional[List[float]]:
-    """
-    Генерирует embedding через OpenAI API.
-
-    Args:
-        text_input: Текст (будет обрезан до MAX_INPUT_CHARS).
-
-    Returns:
-        Список из EMBEDDING_DIMS float-значений или None при ошибке.
-    """
-    if not settings.DEEPSEEK_API_KEY:
-        logger.warning("[dedup] DEEPSEEK_API_KEY не задан — embedding пропущен")
-        return None
-
-    client = _get_client()
-    try:
-        response = await client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text_input[:MAX_INPUT_CHARS],
-        )
-        return response.data[0].embedding
-    except Exception as exc:
-        logger.warning(f"[dedup] DeepSeek embedding недоступен (graceful skip): {type(exc).__name__}")
-        return None
+async def _load_recent_published_titles(lookback_days: int, limit: int) -> List[str]:
+    """Загружает заголовки последних опубликованных статей за lookback_days дней."""
+    async with async_session_factory() as session:
+        rows = (await session.execute(
+            text("""
+                SELECT title FROM raw_articles
+                WHERE status = 'published'
+                  AND fetched_at > datetime('now', :delta)
+                ORDER BY fetched_at DESC
+                LIMIT :limit
+            """),
+            {"delta": f"-{lookback_days} days", "limit": limit},
+        )).fetchall()
+    return [r[0] for r in rows]
 
 
 # ── Публичный интерфейс ───────────────────────────────────────────────────────
 
-async def check_similarity(
-    text_input: str,
+async def check_duplicate(
+    title: str,
     lookback_days: int = 30,
-) -> float:
+) -> Tuple[bool, str]:
     """
-    Вычисляет максимальное косинусное сходство статьи с опубликованными.
-
-    Загружает векторы из article_embeddings за последние lookback_days дней,
-    сравнивает с embedding нового текста и возвращает наибольшее значение.
+    Проверяет, является ли статья дубликатом уже опубликованной нами новости.
 
     Args:
-        text_input:    Текст для проверки (title + content[:200] рекомендуется).
+        title:         Заголовок статьи-кандидата.
         lookback_days: Глубина поиска дубликатов в днях.
 
     Returns:
-        Максимальное косинусное сходство в диапазоне [0.0, 1.0].
-        Возвращает 0.0 если опубликованных статей нет или embedding недоступен.
+        (is_duplicate, matched_title) — matched_title пустая строка, если не дубликат
+        или проверка не удалась (graceful skip).
     """
-    # Генерируем вектор нового текста
-    query_vector = await _generate_embedding(text_input)
-    if query_vector is None:
-        return 0.0
+    if not settings.DEEPSEEK_API_KEY:
+        logger.warning("[dedup] DEEPSEEK_API_KEY не задан — проверка дубликатов пропущена")
+        return False, ""
 
-    # Загружаем векторы опубликованных статей за период
-    async with async_session_factory() as session:
-        rows = (await session.execute(
-            text("""
-                SELECT ae.embedding
-                FROM article_embeddings ae
-                JOIN raw_articles ra ON ae.article_id = ra.id
-                WHERE ra.status = 'published'
-                  AND ra.fetched_at > datetime('now', :delta)
-                ORDER BY ra.fetched_at DESC
-                LIMIT :limit
-            """),
-            {
-                "delta":  f"-{lookback_days} days",
-                "limit":  MAX_VECTORS_LOADED,
-            },
-        )).fetchall()
+    published_titles = await _load_recent_published_titles(lookback_days, MAX_PUBLISHED)
+    if not published_titles:
+        return False, ""
 
-    if not rows:
-        logger.debug("[dedup] Нет опубликованных статей для сравнения")
-        return 0.0
+    client = _get_client()
+    try:
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": _build_user_prompt(title, published_titles)},
+            ],
+            max_tokens=MAX_TOKENS,
+            temperature=0.0,
+            timeout=30,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        raw_content = response.choices[0].message.content.strip()
 
-    # Вычисляем максимальное сходство
-    max_sim = 0.0
-    for (embedding_json,) in rows:
-        try:
-            stored_vector = json.loads(embedding_json)
-            sim = _cosine_similarity(query_vector, stored_vector)
-            if sim > max_sim:
-                max_sim = sim
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.debug(f"[dedup] Не удалось прочитать вектор: {exc}")
-            continue
+        if raw_content.startswith("```"):
+            lines = raw_content.splitlines()
+            raw_content = "\n".join(
+                line for line in lines if not line.startswith("```")
+            ).strip()
 
-    logger.debug(
-        f"[dedup] Сравнение с {len(rows)} векторами: max_sim={max_sim:.4f}"
-    )
-    return max_sim
+        data = json.loads(raw_content)
+    except Exception as exc:
+        logger.warning(
+            f"[dedup] Проверка дубликатов недоступна (graceful skip): "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False, ""
 
+    is_dup  = bool(data.get("is_duplicate", False))
+    matched = data.get("best_match_title") or ""
 
-async def save_embedding(article_id: int, text_input: str) -> bool:
-    """
-    Сохраняет embedding статьи после успешной публикации.
+    if is_dup:
+        logger.info(f"[dedup] Дубликат: {title[:60]!r} == {matched[:60]!r}")
 
-    Вызывается агентом Analyst сразу после публикации поста.
-    Вектор сохраняется в article_embeddings для будущих проверок.
-
-    Args:
-        article_id: ID записи в raw_articles.
-        text_input: Текст (title + content[:200]).
-
-    Returns:
-        True если embedding успешно сохранён, False при ошибке.
-    """
-    vector = await _generate_embedding(text_input)
-    if vector is None:
-        return False
-
-    async with async_session_factory() as session:
-        try:
-            await session.execute(
-                text(
-                    "INSERT OR IGNORE INTO article_embeddings "
-                    "(article_id, embedding) "
-                    "VALUES (:article_id, :embedding)"
-                ),
-                {
-                    "article_id": article_id,
-                    "embedding":  json.dumps(vector),
-                },
-            )
-            await session.commit()
-            logger.info(f"[dedup] Embedding сохранён для article_id={article_id}")
-            return True
-        except Exception as exc:
-            logger.error(f"[dedup] Ошибка сохранения embedding: {exc}")
-            return False
+    return is_dup, matched

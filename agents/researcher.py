@@ -19,6 +19,7 @@
 
 import hashlib
 import logging
+import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -54,10 +55,23 @@ _LOW_VALUE: Dict[str, int] = {kw: 1 for kw in {
 
 SCORE_WEIGHTS: Dict[str, int] = {**_HIGH_VALUE, **_MEDIUM_VALUE, **_LOW_VALUE}
 
+# Компилируем по границам слов один раз — иначе короткие ключевые слова вроде
+# "rag"/"ai"/"data" совпадают как substring внутри average/storage/said/update
+# и искажают скоринг (подтверждённый баг: ложные +1..+2 балла на нерелевантных статьях).
+_KEYWORD_PATTERNS: Dict[str, "re.Pattern[str]"] = {
+    kw: re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
+    for kw in SCORE_WEIGHTS
+}
+
 # Бонус за свежесть: (порог в часах, баллы)
 RECENCY_BONUSES = [(24, 20), (48, 10), (168, 5)]
 
-MIN_SCORE          = 15  # Минимальный порог попадания в кандидаты
+# MIN_SCORE намеренно выше максимального бонуса за свежесть (20) — иначе
+# ЛЮБАЯ только что вставленная статья с нулевым совпадением по ключевым словам
+# проходит порог автоматически, и keyword-фильтр перестаёт что-либо фильтровать
+# для свежих статей (подтверждённый баг). Теперь даже самой свежей статье нужно
+# набрать хотя бы 1 балл релевантности сверху.
+MIN_SCORE          = 22  # Минимальный порог попадания в кандидаты
 FALLBACK_MIN_SCORE = 6   # Fallback порог: когда пул старый, нет бонуса свежести
 MAX_RESULTS        = 5   # Максимум кандидатов на выходе
 FETCH_WORKERS      = 5   # Потоков для параллельного парсинга
@@ -190,8 +204,11 @@ def _compute_score(title: str, content: str, published_at: Optional[datetime]) -
     Формула: Σ(вес × вхождений keyword) + бонус за свежесть.
     Поиск нечувствителен к регистру и ведётся по заголовку + содержимому.
     """
-    haystack = (title + " " + content).lower()
-    score = sum(weight * haystack.count(kw) for kw, weight in SCORE_WEIGHTS.items())
+    haystack = title + " " + content
+    score = sum(
+        weight * len(_KEYWORD_PATTERNS[kw].findall(haystack))
+        for kw, weight in SCORE_WEIGHTS.items()
+    )
 
     if published_at is not None:
         if published_at.tzinfo is None:
@@ -390,11 +407,31 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
     all_raw: List[dict] = []
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
         futures = {pool.submit(_parse_feed, src): src["name"] for src in sources}
-        for future in as_completed(futures, timeout=30):
-            try:
-                all_raw.extend(future.result())
-            except Exception as exc:
-                logger.warning(f"[researcher] Поток упал ({futures[future]}): {exc}")
+        processed: set = set()
+        try:
+            for future in as_completed(futures, timeout=30):
+                processed.add(future)
+                try:
+                    all_raw.extend(future.result())
+                except Exception as exc:
+                    logger.warning(f"[researcher] Поток упал ({futures[future]}): {exc}")
+        except TimeoutError:
+            # Общий таймаут as_completed() истёк раньше, чем завершились ВСЕ
+            # источники — одна медленная/зависшая RSS-лента раньше роняла весь
+            # прогон целиком. Теперь просто продолжаем с тем, что уже успело
+            # завершиться, вместо потери всех уже распарсенных статей.
+            pending = [name for f, name in futures.items() if f not in processed]
+            logger.warning(
+                f"[researcher] Таймаут 30с парсинга RSS истёк — "
+                f"продолжаем с {len(processed)}/{len(futures)} завершённых источников, "
+                f"не дождались: {pending}"
+            )
+            for future in futures:
+                if future not in processed and future.done():
+                    try:
+                        all_raw.extend(future.result())
+                    except Exception as exc:
+                        logger.warning(f"[researcher] Поток упал ({futures[future]}): {exc}")
 
     logger.info(f"[researcher] Получено из RSS: {len(all_raw)} записей")
     if not all_raw:

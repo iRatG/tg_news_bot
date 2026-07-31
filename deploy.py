@@ -40,11 +40,41 @@ UPLOAD_PATHS = [
     "agents/fact_checker.py",
     "agents/writer.py",
     "agents/formatter.py",
+    "agents/analyst.py",
     "core/pipeline.py",
     "core/config.py",
     "core/publisher.py",
+    "core/dedup.py",
+    "core/scheduler.py",
     "scripts/run_once.py",
+    "web",   # директория — разворачивается рекурсивно, см. _expand_paths()
 ]
+
+
+def _expand_paths(paths):
+    """
+    Разворачивает директории из UPLOAD_PATHS в список отдельных файлов.
+
+    Раньше UPLOAD_PATHS содержал только точечные файлы — когда чинили
+    core/dedup.py или web/admin.py, про них забывали добавить в список,
+    и deploy_fast()/deploy_rebuild() тихо не выгружали изменения на прод
+    (контейнер рестартовал со старым багованным кодом внутри, без единой
+    ошибки в выводе). Директории здесь разворачиваются рекурсивно, поэтому
+    новые файлы внутри уже перечисленной директории (например, новый шаблон
+    в web/templates/) подхватятся сами, без риска повторить эту ошибку.
+    """
+    expanded = []
+    for rel_path in paths:
+        local_path = os.path.join(LOCAL_DIR, rel_path.replace("/", os.sep))
+        if os.path.isdir(local_path):
+            for root, _dirs, files in os.walk(local_path):
+                for fname in files:
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, LOCAL_DIR).replace(os.sep, "/")
+                    expanded.append(rel)
+        else:
+            expanded.append(rel_path)
+    return expanded
 
 
 def connect(retries=8):
@@ -74,10 +104,27 @@ def run(ssh, cmd, desc="", timeout=60):
     return out
 
 
+def _ensure_dirs(ssh, upload_paths):
+    """mkdir -p для всех директорий, встречающихся в upload_paths — и на VPS, и внутри контейнера."""
+    dirs = sorted({
+        os.path.dirname(rel_path) for rel_path in upload_paths
+        if os.path.dirname(rel_path)
+    })
+    if not dirs:
+        return
+    run(ssh, "mkdir -p " + " ".join(f"{REMOTE_DIR}/{d}" for d in dirs),
+        "Ensure remote directories")
+    run(ssh, f"docker exec {CONTAINER} mkdir -p " + " ".join(f"/app/{d}" for d in dirs),
+        "Ensure directories inside container")
+
+
 def deploy_fast(ssh):
     """Upload files via SFTP, copy into running container, restart."""
+    upload_paths = _expand_paths(UPLOAD_PATHS)
+    _ensure_dirs(ssh, upload_paths)
+
     sftp = ssh.open_sftp()
-    for rel_path in UPLOAD_PATHS:
+    for rel_path in upload_paths:
         local_path  = os.path.join(LOCAL_DIR, rel_path.replace("/", os.sep))
         remote_path = f"{REMOTE_DIR}/{rel_path}"
         sftp.put(local_path, remote_path)
@@ -85,7 +132,7 @@ def deploy_fast(ssh):
     sftp.close()
 
     # Copy each file directly into the running container
-    for rel_path in UPLOAD_PATHS:
+    for rel_path in upload_paths:
         run(ssh,
             f"docker cp {REMOTE_DIR}/{rel_path} {CONTAINER}:/app/{rel_path}",
             desc=f"docker cp {rel_path}")
@@ -97,8 +144,14 @@ def deploy_fast(ssh):
 
 def deploy_rebuild(ssh):
     """Full rebuild: docker build + stop old containers + run new."""
+    upload_paths = _expand_paths(UPLOAD_PATHS)
+    dirs = sorted({os.path.dirname(rp) for rp in upload_paths if os.path.dirname(rp)})
+    if dirs:
+        run(ssh, "mkdir -p " + " ".join(f"{REMOTE_DIR}/{d}" for d in dirs),
+            "Ensure remote directories")
+
     sftp = ssh.open_sftp()
-    for rel_path in UPLOAD_PATHS:
+    for rel_path in upload_paths:
         local_path  = os.path.join(LOCAL_DIR, rel_path.replace("/", os.sep))
         remote_path = f"{REMOTE_DIR}/{rel_path}"
         sftp.put(local_path, remote_path)

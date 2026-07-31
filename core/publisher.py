@@ -115,6 +115,11 @@ async def publish_post(formatter_result: FormatterResult) -> int:
     Если есть image_bytes — отправляет фото с caption.
     Иначе — текстовое сообщение с превью ссылки.
 
+    Retry до 3 раз с 10с задержкой — api.telegram.org нестабилен с RU VPS
+    (тот же паттерн, что и в send_post(), используемом arXiv-пайплайном;
+    раньше здесь ретрая не было, и единичный сетевой сбой терял уже
+    полностью готовую статью на последнем шаге пайплайна).
+
     Args:
         formatter_result: Результат агента Formatter с текстом и картинкой.
 
@@ -122,36 +127,45 @@ async def publish_post(formatter_result: FormatterResult) -> int:
         message_id опубликованного сообщения.
 
     Raises:
-        telegram.error.TelegramError: при ошибке Bot API.
+        telegram.error.TelegramError: при ошибке Bot API после всех попыток.
     """
     channel = settings.active_channel
-    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
+    last_exc: Exception = RuntimeError("publish_post: не удалось опубликовать")
 
-    async with bot:
-        if formatter_result.image_bytes is not None:
-            msg = await bot.send_photo(
-                chat_id=channel,
-                photo=formatter_result.image_bytes,
-                caption=formatter_result.formatted_text,
-                parse_mode=ParseMode.HTML,
-            )
-            logger.info(
-                f"[publisher] Фото опубликовано: msg_id={msg.message_id} "
-                f"channel={channel}"
-            )
-        else:
-            msg = await bot.send_message(
-                chat_id=channel,
-                text=formatter_result.formatted_text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=False,
-            )
-            logger.info(
-                f"[publisher] Сообщение опубликовано: msg_id={msg.message_id} "
-                f"channel={channel}"
-            )
+    for attempt in range(3):
+        try:
+            bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, request=_TG_REQUEST)
+            async with bot:
+                if formatter_result.image_bytes is not None:
+                    msg = await bot.send_photo(
+                        chat_id=channel,
+                        photo=formatter_result.image_bytes,
+                        caption=formatter_result.formatted_text,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    logger.info(
+                        f"[publisher] Фото опубликовано: msg_id={msg.message_id} "
+                        f"channel={channel}"
+                    )
+                else:
+                    msg = await bot.send_message(
+                        chat_id=channel,
+                        text=formatter_result.formatted_text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=False,
+                    )
+                    logger.info(
+                        f"[publisher] Сообщение опубликовано: msg_id={msg.message_id} "
+                        f"channel={channel}"
+                    )
+            return msg.message_id
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(f"[publisher] publish_post попытка {attempt + 1}/3: {exc}")
+            if attempt < 2:
+                await asyncio.sleep(10)
 
-    return msg.message_id
+    raise last_exc
 
 
 async def notify_admin(message: str) -> None:
