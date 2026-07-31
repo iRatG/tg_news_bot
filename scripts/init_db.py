@@ -67,12 +67,13 @@ DEFAULT_SETTINGS = [
     ("post_style_current",  "curator",               "Текущий стиль постов: curator|tech_analyst|practitioner|skeptic"),
     ("morning_digest_hour", "7",                     "Час утреннего дайджеста (МСК, 0-23)"),
     ("morning_digest_enabled", "true",               "Включить утренний дайджест (true/false)"),
+    ("arxiv_schedule_hour", "19",                    "Час прогона arXiv (МСК, 0-23) — конец рабочего дня"),
+    ("arxiv_schedule_enabled", "true",               "Включить прогон arXiv (true/false)"),
 ]
 
 DEFAULT_SCHEDULE_SLOTS = [
-    (9,  0, "mon-sun"),
-    (14, 0, "mon-sun"),
-    (19, 0, "mon-sun"),
+    (12, 0, "mon-sun"),   # обед — люди чаще смотрят телефон
+    (16, 0, "mon-sun"),   # конец рабочего дня
 ]
 
 # ── Init logic ────────────────────────────────────────────────────────────────
