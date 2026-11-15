@@ -25,9 +25,7 @@ from core.config import settings
 from db.database import engine
 from db.models import (
     AgentLog,
-    ArticleEmbedding,
     PipelineRun,
-    PostStats,
     PublishedPost,
     RawArticle,
     ScheduleSlot,
@@ -228,7 +226,9 @@ from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.ADMIN_PASSWORD or "newsbot-session-secret",
-    https_only=False,
+    # В проде админка доступна только через HTTPS (Caddy) — cookie сессии
+    # не должна уходить по http. Локально (development) — обычный http.
+    https_only=settings.ENVIRONMENT == "production",
 )
 
 admin = Admin(

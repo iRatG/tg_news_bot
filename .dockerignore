@@ -1,0 +1,33 @@
+# Не даём секретам, БД и мусору попасть в Docker-образ (Dockerfile делает COPY . .)
+# Секреты передаются только через --env-file, БД — через volume /app/data.
+
+# Секреты
+.env
+.env.*
+!.env.example
+key_param.txt
+keys.txt
+
+# Данные и логи (монтируются volume)
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+
+# VCS / CI / IDE
+.git
+.github
+.claude
+.vscode
+.idea
+
+# Python-мусор
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Деплой-архивы
+*.tar.gz

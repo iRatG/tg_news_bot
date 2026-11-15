@@ -29,8 +29,7 @@ build/
 .venv/
 venv/
 
-# Docker
-.dockerignore
+# Docker: .dockerignore намеренно В git (не даёт .env и БД попасть в образ)
 
 # OS
 .DS_Store

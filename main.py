@@ -46,6 +46,11 @@ async def main() -> None:
         log_level="warning",    # uvicorn тихий — наш logger уже настроен
         access_log=False,       # Снижаем шум в логах
         loop="asyncio",
+        # За Caddy (HTTPS) — доверяем X-Forwarded-Proto, иначе редиректы и
+        # форма логина строятся на http:// и пароль уходит открытым текстом.
+        # "*" безопасно: порт опубликован только на 127.0.0.1 (см. deploy.py).
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
     server = uvicorn.Server(config)
 

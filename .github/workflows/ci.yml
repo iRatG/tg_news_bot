@@ -1,0 +1,77 @@
+# ── CI: проверка кода на каждый push / PR ────────────────────────────────────
+#
+# Деплоя здесь НЕТ — намеренно (2026-11-15). Прежний job при push в main
+# перезаписывал боевой .env значениями из GitHub Secrets, деплоил на VPS_HOST
+# из секретов (старый взломанный сервер) и поднимал второй контейнер с
+# -p 8010:8010 в обход файрвола. Секреты бота хранятся только на сервере.
+# Деплой — вручную с машины разработчика: `python deploy.py` (см. README).
+#
+# Проверки без секретов и без сети к LLM:
+#   1. ruff — синтаксис и ошибки уровня pyflakes (неопределённые имена и т.п.)
+#   2. smoke: импорт всех модулей приложения + init_db на временной SQLite
+#   3. docker build — образ собирается (Dockerfile/requirements не сломаны)
+
+name: CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt ruff
+
+      - name: Ruff (pyflakes + syntax)
+        run: ruff check --select F,E9 --output-format github .
+
+      - name: Smoke — import all app modules
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:////tmp/newsbot_ci.db"
+        run: |
+          python - <<'EOF'
+          import importlib
+          mods = [
+              "core.config", "core.llm", "core.dedup", "core.publisher",
+              "core.pipeline", "core.scheduler",
+              "agents.researcher", "agents.fact_checker", "agents.writer",
+              "agents.formatter", "agents.analyst", "agents.arxiv_agent",
+              "web.admin", "main",
+          ]
+          for m in mods:
+              importlib.import_module(m)
+              print("ok", m)
+          EOF
+
+      - name: Smoke — init DB on temp SQLite
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:////tmp/newsbot_ci.db"
+        run: python scripts/init_db.py
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build image
+        run: docker build -t tg_news_bot:ci .
+      - name: No secrets in image
+        run: |
+          docker run --rm --entrypoint sh tg_news_bot:ci -c \
+            'test ! -e /app/.env && test ! -e /app/key_param.txt && ! ls /app/data/*.db 2>/dev/null' \
+            && echo "image clean"

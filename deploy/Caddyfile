@@ -1,0 +1,19 @@
+# HTTPS-прокси для админки бота. Сертификат Let's Encrypt Caddy получает и
+# продлевает сам (нужны открытые 80 и 443). Бот слушает только 127.0.0.1:8010.
+#
+# {$ADMIN_DOMAIN} подставляется из окружения caddy.service
+# (server_setup.sh пишет его в /etc/default/caddy). Без своего домена —
+# <ip-через-дефисы>.sslip.io, например 203-0-113-10.sslip.io для 203.0.113.10.
+
+{$ADMIN_DOMAIN} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+	redir / /admin/ 302
+	reverse_proxy 127.0.0.1:8010
+}
