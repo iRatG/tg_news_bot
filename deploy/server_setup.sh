@@ -88,7 +88,7 @@ systemctl enable caddy >/dev/null 2>&1
 systemctl restart caddy
 
 log "Каталог приложения"
-mkdir -p "$APP_DIR/data" /opt/backups/tg_news_bot
+mkdir -p "$APP_DIR/data" "$APP_DIR/logs" /opt/backups/tg_news_bot
 chmod 700 /opt/backups/tg_news_bot
 chmod 600 /opt/backups/tg_news_bot/*.gz 2>/dev/null || true
 [ -f "$APP_DIR/.env" ] && chmod 600 "$APP_DIR/.env" || echo "!! $APP_DIR/.env ещё нет — положите секреты (шаг 3)"

@@ -149,7 +149,7 @@ def run(ssh, cmd: str, desc: str = "", timeout: int = 120, check: bool = True) -
 def upload_release(ssh, data: bytes, rev: str) -> str:
     """Загружает архив и распаковывает в REMOTE_DIR. Возвращает путь архива на сервере."""
     remote_tar = f"{REMOTE_DIR}/.release.tar.gz"
-    run(ssh, f"mkdir -p {REMOTE_DIR}/data", "Ensure remote dirs")
+    run(ssh, f"mkdir -p {REMOTE_DIR}/data {REMOTE_DIR}/logs", "Ensure remote dirs")
     sftp = ssh.open_sftp()
     with sftp.open(remote_tar, "wb") as f:
         f.write(data)
@@ -187,7 +187,8 @@ def deploy_rebuild(ssh) -> None:
     run(ssh, f"docker rm -f {CONTAINER} >/dev/null 2>&1; echo removed", "Remove old container")
     run(ssh,
         f"docker run -d --name {CONTAINER} --restart unless-stopped "
-        f"-v {REMOTE_DIR}/data:/app/data --env-file {REMOTE_DIR}/.env "
+        f"-v {REMOTE_DIR}/data:/app/data -v {REMOTE_DIR}/logs:/app/logs "
+        f"--env-file {REMOTE_DIR}/.env "
         f"-p {PORT_BIND} {IMAGE}",
         "Start new container")
 

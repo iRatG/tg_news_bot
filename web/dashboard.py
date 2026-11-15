@@ -95,6 +95,8 @@ async def sources(_=Depends(verify_credentials)):
 
 # ── Временная шкала публикаций ────────────────────────────────────────────────
 
+# Время в БД — UTC (CURRENT_TIMESTAMP). Расписание и читатели — МСК (UTC+3,
+# без перехода на летнее время с 2014), поэтому дни/часы на графиках — по МСК.
 @app.get("/api/dashboard/timeline")
 async def timeline(_=Depends(verify_credentials)):
     """
@@ -105,13 +107,13 @@ async def timeline(_=Depends(verify_credentials)):
     async with async_session_factory() as session:
         rows = (await session.execute(text("""
             SELECT
-                DATE(pr.started_at)        AS day,
+                DATE(pr.started_at, '+3 hours') AS day,
                 SUM(pr.articles_found)     AS found,
                 SUM(pr.articles_published) AS published
             FROM pipeline_runs pr
             WHERE pr.started_at > datetime('now', '-30 days')
               AND pr.status IN ('completed', 'completed_empty')
-            GROUP BY DATE(pr.started_at)
+            GROUP BY DATE(pr.started_at, '+3 hours')
             ORDER BY day ASC
         """))).fetchall()
 
@@ -133,14 +135,14 @@ async def costs(_=Depends(verify_credentials)):
     async with async_session_factory() as session:
         rows = (await session.execute(text("""
             SELECT
-                DATE(al.created_at)             AS day,
+                DATE(al.created_at, '+3 hours') AS day,
                 al.agent_name,
                 SUM(al.input_tokens)            AS input_tokens,
                 SUM(al.output_tokens)           AS output_tokens
             FROM agent_logs al
             WHERE al.created_at > datetime('now', '-30 days')
               AND (al.input_tokens > 0 OR al.output_tokens > 0)
-            GROUP BY DATE(al.created_at), al.agent_name
+            GROUP BY DATE(al.created_at, '+3 hours'), al.agent_name
             ORDER BY day ASC, al.agent_name
         """))).fetchall()
 
@@ -278,7 +280,7 @@ async def analytics(_=Depends(verify_credentials)):
 
         # Активность публикаций по часам суток
         hour_rows = (await session.execute(text("""
-            SELECT CAST(strftime('%H', published_at) AS INTEGER) AS hour,
+            SELECT CAST(strftime('%H', published_at, '+3 hours') AS INTEGER) AS hour,
                    COUNT(*) AS cnt
             FROM published_posts
             WHERE published_at > datetime('now', '-30 days')
