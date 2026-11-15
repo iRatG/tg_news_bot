@@ -23,6 +23,8 @@ log() { printf '\n==> %s\n' "$*"; }
 log "Пакеты"
 apt-get update -qq
 apt-get install -y -qq docker.io fail2ban ufw caddy sqlite3 curl unattended-upgrades >/dev/null
+# BuildKit (legacy builder deprecated); пакета может не быть в старых релизах — не критично
+apt-get install -y -qq docker-buildx >/dev/null 2>&1 || echo "docker-buildx недоступен — используется legacy builder"
 systemctl enable --now docker fail2ban >/dev/null 2>&1
 
 log "SSH: только по ключу"
@@ -80,12 +82,15 @@ cat > /etc/systemd/system/caddy.service.d/env.conf <<'EOF'
 EnvironmentFile=/etc/default/caddy
 EOF
 systemctl daemon-reload
-ADMIN_DOMAIN="$ADMIN_DOMAIN" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+ADMIN_DOMAIN="$ADMIN_DOMAIN" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 \
+    || { echo "!! Caddyfile невалиден"; exit 1; }
 systemctl enable caddy >/dev/null 2>&1
 systemctl restart caddy
 
 log "Каталог приложения"
 mkdir -p "$APP_DIR/data" /opt/backups/tg_news_bot
+chmod 700 /opt/backups/tg_news_bot
+chmod 600 /opt/backups/tg_news_bot/*.gz 2>/dev/null || true
 [ -f "$APP_DIR/.env" ] && chmod 600 "$APP_DIR/.env" || echo "!! $APP_DIR/.env ещё нет — положите секреты (шаг 3)"
 
 log "Готово"

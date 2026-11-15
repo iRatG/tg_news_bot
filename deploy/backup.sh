@@ -7,6 +7,7 @@
 #    (если в .env задан TELEGRAM_ADMIN_CHAT_ID). Локальная копия не спасёт при
 #    потере сервера — так уже было со старым VPS в 2026-11.
 set -eu
+umask 077   # бэкап содержит всю БД — читать только root
 
 APP_DIR=/opt/tg_news_bot
 DB="$APP_DIR/data/newsbot.db"
