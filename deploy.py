@@ -155,7 +155,7 @@ def upload_release(ssh, data: bytes, rev: str) -> str:
         f.write(data)
     sftp.close()
     print(f"[SFTP] release {rev}: {len(data) // 1024} KB")
-    run(ssh, f"tar -xzf {remote_tar} -C {REMOTE_DIR} && echo {rev} > {REMOTE_DIR}/REVISION",
+    run(ssh, f"tar -xzmf {remote_tar} -C {REMOTE_DIR} && echo {rev} > {REMOTE_DIR}/REVISION",
         "Unpack release")
     return remote_tar
 
@@ -175,7 +175,7 @@ def deploy_fast(ssh, remote_tar: str) -> None:
         print("[DEPLOY] Контейнер не запущен — переключаюсь на --rebuild")
         deploy_rebuild(ssh)
         return
-    run(ssh, f"gunzip -c {remote_tar} | docker exec -i {CONTAINER} tar -x -C /app",
+    run(ssh, f"gunzip -c {remote_tar} | docker exec -i {CONTAINER} tar -xm -C /app",
         "Copy code into container")
     run(ssh, f"docker restart {CONTAINER}", "Restart container", timeout=60)
 
