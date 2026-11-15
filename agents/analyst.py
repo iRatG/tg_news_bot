@@ -28,7 +28,7 @@ from agents.researcher import RawArticleCandidate
 from agents.writer import WriterResult
 from core.config import get_setting, settings
 from core.dedup import check_duplicate
-from core.publisher import notify_admin, publish_post
+from core.publisher import publish_post
 from db.database import async_session_factory
 from db.models import ArticleStatus
 

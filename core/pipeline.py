@@ -30,7 +30,7 @@ from agents.fact_checker import VerificationResult
 from agents.researcher import RawArticleCandidate
 from core.config import get_setting, settings
 from core.logger import agent_logger
-from core.publisher import notify_admin, publish_post
+from core.publisher import notify_admin
 from db.database import async_session_factory
 from db.models import ArticleStatus, RunStatus
 

@@ -92,7 +92,7 @@ async def test_db() -> None:
 async def test_arxiv_fetch() -> None:
     print("\n[arxiv] fetch_new_papers()")
     try:
-        from agents.arxiv_agent import ArxivAgent, ARXIV_QUERIES
+        from agents.arxiv_agent import ArxivAgent
         agent = ArxivAgent()
 
         t0 = time.monotonic()

@@ -6,7 +6,6 @@ API endpoints для Chart.js дашборда — web/dashboard.py.
 """
 
 import logging
-from typing import List
 
 from fastapi import Depends
 from sqlalchemy import text

@@ -95,9 +95,8 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 os.environ.setdefault("PYTHONUTF8", "1")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -335,7 +334,7 @@ def print_writer_report(results: Dict[str, list], n_articles: int) -> None:
         daily_pro   = total_pro   / max(len(pro),   1) * 3
         daily_sonar = total_sonar / max(len(sonar), 1) * 3
         print(f"\n  💰 Экономия: {saving:.0f}% при переходе sonar-pro → sonar")
-        print(f"  📅 При 3 постах в день:")
+        print("  📅 При 3 постах в день:")
         print(f"     sonar-pro : ${daily_pro:.4f}/день  = ${daily_pro*30:.3f}/мес")
         print(f"     sonar     : ${daily_sonar:.4f}/день  = ${daily_sonar*30:.3f}/мес")
     print(f"{'='*60}")
@@ -391,8 +390,8 @@ async def test_writer(n: int) -> Dict[str, list]:
 
     print(f"\n{'='*60}")
     print(f"  ТЕСТ WRITER — {len(articles)} статей")
-    print(f"  sonar-pro (текущий) vs sonar (кандидат)")
-    print(f"  search_context_size=low (экономия поиска)")
+    print("  sonar-pro (текущий) vs sonar (кандидат)")
+    print("  search_context_size=low (экономия поиска)")
     print(f"{'='*60}\n")
 
     results: Dict[str, list] = {"sonar-pro": [], "sonar": []}
@@ -477,7 +476,7 @@ async def test_formatter(n: int) -> Dict[str, list]:
 
     print(f"\n{'='*60}")
     print(f"  ТЕСТ FORMATTER — {len(posts)} постов")
-    print(f"  sonar-pro (текущий) vs sonar (кандидат)")
+    print("  sonar-pro (текущий) vs sonar (кандидат)")
     print(f"{'='*60}\n")
 
     results: Dict[str, list] = {"sonar-pro": [], "sonar": []}
