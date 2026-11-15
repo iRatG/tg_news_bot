@@ -17,9 +17,10 @@
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 import openai
 from tenacity import (
@@ -52,6 +53,9 @@ class VerificationResult:
     confidence:    float
     reason:        str
     sources:       List[str] = field(default_factory=list)
+    # Факты из веб-поиска — единственный "веб-контекст" для Writer (DeepSeek
+    # сам в интернет не ходит). Пусто → Writer пишет только по контенту статьи.
+    key_facts:     List[str] = field(default_factory=list)
     input_tokens:  int = 0
     output_tokens: int = 0
     latency_ms:    int = 0
@@ -94,8 +98,14 @@ URL источника: {article.url}
     "confidence": число от 0.0 до 1.0,
     "reasoning": "краткое объяснение на русском языке",
     "sources": ["url1", "url2"],
-    "is_duplicate_topic": true или false
-}}"""
+    "is_duplicate_topic": true или false,
+    "key_facts": ["факт 1", "факт 2"]
+}}
+
+key_facts — 3-6 конкретных фактов по теме статьи из найденных источников: числа, даты,
+названия, сравнения, цены, ограничения. Каждый — одно предложение на русском.
+Только то, что прямо написано в источниках; без сносок [1]. Если статья не подтверждена —
+пустой список."""
 
 
 # ── Retry-декоратор для API-вызовов ──────────────────────────────────────────
@@ -135,7 +145,7 @@ async def _call_perplexity(article: RawArticleCandidate) -> dict:
             {"role": "user",   "content": _build_user_prompt(article)},
         ],
         temperature=0.1,   # Низкая температура — стабильный JSON
-        max_tokens=512,
+        max_tokens=1000,   # +key_facts (3-6 предложений на русском)
         extra_body={
             # Fact-Checker активно использует веб-поиск для верификации —
             # "high" даёт больше источников и точнее определяет достоверность.
@@ -232,6 +242,12 @@ async def verify(article: RawArticleCandidate) -> VerificationResult:
     reasoning        = str(data.get("reasoning", ""))
     sources          = data.get("sources", [])
     is_dup           = bool(data.get("is_duplicate_topic", False))
+    raw_facts        = data.get("key_facts") or []
+    key_facts        = [
+        re.sub(r"\[\d+\]", "", str(f)).strip()
+        for f in (raw_facts if isinstance(raw_facts, list) else [])
+        if str(f).strip()
+    ][:6]
     input_tokens     = int(data.get("_input_tokens",  0))
     output_tokens    = int(data.get("_output_tokens", 0))
 
@@ -280,7 +296,7 @@ async def verify(article: RawArticleCandidate) -> VerificationResult:
     # --- Статья прошла все проверки ---
     logger.info(
         f"[fact_checker] OK: conf={confidence:.2f} "
-        f"sources={len(sources)} latency={latency}ms "
+        f"sources={len(sources)} facts={len(key_facts)} latency={latency}ms "
         f"tokens={input_tokens}+{output_tokens}"
     )
     return VerificationResult(
@@ -289,6 +305,7 @@ async def verify(article: RawArticleCandidate) -> VerificationResult:
         confidence=confidence,
         reason=reasoning,
         sources=sources,
+        key_facts=key_facts,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency,

@@ -9,14 +9,13 @@
 Пайплайн для одной бумаги:
     fetch_new_papers()  → список новых (ещё не опубликованных) бумаг
     _extract_github()   → GitHub-ссылка из abstract (если есть)
-    _summarize_paper()  → краткий обзор на русском через Perplexity sonar
+    _summarize_paper()  → краткий обзор на русском через DeepSeek (core/llm.py)
     _format_html_post() → готовый HTML-пост для Telegram
     process_paper()     → объединяет всё вышеперечисленное
 """
 
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
 import re
@@ -26,10 +25,9 @@ from typing import Optional
 
 import feedparser
 import httpx
-import openai
 from sqlalchemy import text
 
-from core.config import settings
+from core.llm import deepseek_chat
 from db.database import async_session_factory
 
 logger = logging.getLogger(__name__)
@@ -55,8 +53,6 @@ _GITHUB_RE = re.compile(
     re.IGNORECASE,
 )
 
-_PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
-_MODEL = "sonar"
 _MAX_SUMMARY_CHARS = 1500
 
 _SYSTEM_PROMPT = (
@@ -283,7 +279,7 @@ class ArxivAgent:
 
     async def _summarize_paper(self, paper: dict) -> tuple[str, int, int]:
         """
-        Генерирует краткий обзор бумаги на русском через Perplexity sonar.
+        Генерирует краткий обзор бумаги на русском через DeepSeek.
 
         Returns:
             (summary_text, input_tokens, output_tokens)
@@ -291,7 +287,7 @@ class ArxivAgent:
         authors = paper["authors"]
         authors_str = ", ".join(authors[:5])
         if len(authors) > 5:
-            authors_str += f" и др."
+            authors_str += " и др."
 
         prompt = _SUMMARY_PROMPT.format(
             title=paper["title"],
@@ -301,28 +297,14 @@ class ArxivAgent:
             max_chars=_MAX_SUMMARY_CHARS,
         )
 
-        client = openai.AsyncOpenAI(
-            api_key=settings.PERPLEXITY_API_KEY,
-            base_url=_PERPLEXITY_BASE_URL,
-        )
-
-        response = await client.chat.completions.create(
-            model=_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": prompt},
-            ],
+        # Пересказ по abstract — веб-поиск не нужен → DeepSeek (core/llm.py)
+        summary, in_tok, out_tok = await deepseek_chat(
+            _SYSTEM_PROMPT, prompt,
             max_tokens=2000,
             temperature=0.7,
-            extra_body={"web_search_options": {"search_context_size": "low"}},
         )
-
-        summary = response.choices[0].message.content.strip()
         summary = self._strip_artifacts(summary)
         summary = self._trim_to_limit(summary, _MAX_SUMMARY_CHARS)
-
-        in_tok  = response.usage.prompt_tokens     if response.usage else 0
-        out_tok = response.usage.completion_tokens if response.usage else 0
 
         return summary, in_tok, out_tok
 

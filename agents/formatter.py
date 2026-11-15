@@ -16,15 +16,14 @@ from __future__ import annotations
 
 Алгоритм:
     1. Читает post_format из WriterResult для выбора лимита и режима картинки.
-    2. Передаёт текст в Perplexity sonar-pro с инструкцией добавить HTML-теги Telegram.
+    2. Передаёт текст в DeepSeek (core/llm.py) с инструкцией добавить HTML-теги Telegram.
     3. Проверяет баланс тегов <b> и корректность <a href="...">.
     4. Если single + image_enabled=true + LEONARDO_API_KEY задан — генерирует картинку:
-       a) sonar-pro создаёт image-prompt (до 100 слов)
+       a) DeepSeek создаёт image-prompt (до 80 слов)
        b) Leonardo AI API: POST generations → poll → download bytes в память
        c) При любой ошибке Leonardo — пропускаем картинку, не блокируем пайплайн
 
-Примечание: Perplexity sonar-pro доступен глобально с RU VPS.
-DeepSeek НЕ работает внутри Docker-контейнера на VPS (Connection error, 2026-02-22).
+Модель (с 2026-11-15): DeepSeek — веб-поиск здесь не нужен, только разметка.
 Стоимость: ~$0.001/день без картинок; ~$0.06/день с Leonardo AI.
 """
 
@@ -34,23 +33,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-import openai
 import requests
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from agents.writer import WriterResult
 from core.config import get_setting, settings
+from core.llm import deepseek_chat
 
 logger = logging.getLogger(__name__)
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
-FORMATTER_MODEL      = "sonar"    # sonar идентично sonar-pro по качеству HTML, на 87% дешевле
 TELEGRAM_MAX_SINGLE  = 1024   # Лимит caption (с картинкой) и short message
 TELEGRAM_MAX_LONG    = 4096   # Лимит обычного сообщения (без картинки)
 LEONARDO_POLL_SEC    = 3      # Интервал опроса статуса генерации
@@ -79,20 +71,6 @@ class FormatterResult:
         )
 
 
-# ── Retry ─────────────────────────────────────────────────────────────────────
-
-def _retryable(func):
-    """3 попытки при RateLimitError / APIStatusError."""
-    return retry(
-        retry=retry_if_exception_type(
-            (openai.RateLimitError, openai.APIStatusError)
-        ),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=30),
-        reraise=True,
-    )(func)
-
-
 # ── HTML форматирование ───────────────────────────────────────────────────────
 
 _FORMAT_SYSTEM = (
@@ -115,35 +93,20 @@ def _format_prompt(post_text: str) -> str:
 {post_text}"""
 
 
-@_retryable
 async def _format_html(post_text: str) -> tuple[str, int, int]:
     """
-    Применяет Telegram HTML-разметку через Perplexity sonar.
+    Применяет Telegram HTML-разметку через DeepSeek (ретраи — внутри deepseek_chat).
 
     Returns:
         (formatted_text, input_tokens, output_tokens)
     """
-    client = openai.AsyncOpenAI(
-        api_key=settings.PERPLEXITY_API_KEY,
-        base_url="https://api.perplexity.ai",
-    )
-    response = await client.chat.completions.create(
-        model=FORMATTER_MODEL,
-        messages=[
-            {"role": "system", "content": _FORMAT_SYSTEM},
-            {"role": "user",   "content": _format_prompt(post_text)},
-        ],
+    # Только расставляет теги — веб-поиск не нужен → DeepSeek.
+    # max_tokens 3000: на выходе весь пост (до 3800 симв. у дайджеста) + теги.
+    return await deepseek_chat(
+        _FORMAT_SYSTEM, _format_prompt(post_text),
+        max_tokens=3000,
         temperature=0.1,
-        max_tokens=1500,
-        extra_body={
-            # Formatter только добавляет HTML-теги, веб-поиск не нужен
-            "web_search_options": {"search_context_size": "low"},
-        },
     )
-    text    = response.choices[0].message.content.strip()
-    in_tok  = getattr(response.usage, "prompt_tokens",     0)
-    out_tok = getattr(response.usage, "completion_tokens", 0)
-    return text, in_tok, out_tok
 
 
 _UNSUPPORTED_TAGS = re.compile(
@@ -407,27 +370,18 @@ def _validate_html(text: str, max_chars: int = TELEGRAM_MAX_SINGLE) -> str:
 
 # ── Leonardo AI — генерация изображений ──────────────────────────────────────
 
-@_retryable
 async def _generate_image_prompt(post_text: str) -> str:
-    """Генерирует краткий image-prompt для Leonardo AI через Perplexity sonar."""
-    client = openai.AsyncOpenAI(
-        api_key=settings.PERPLEXITY_API_KEY,
-        base_url="https://api.perplexity.ai",
-    )
-    response = await client.chat.completions.create(
-        model=FORMATTER_MODEL,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Создай краткий image-prompt для Leonardo AI на английском языке "
-                "(максимум 80 слов). Стиль: futuristic digital art, no text in image. "
-                f"Контекст поста:\n{post_text[:200]}"
-            ),
-        }],
+    """Генерирует краткий image-prompt для Leonardo AI через DeepSeek."""
+    text, _, _ = await deepseek_chat(
+        "",
+        "Создай краткий image-prompt для Leonardo AI на английском языке "
+        "(максимум 80 слов). Стиль: futuristic digital art, no text in image. "
+        "Верни только сам prompt, без пояснений. "
+        f"Контекст поста:\n{post_text[:200]}",
+        max_tokens=200,
         temperature=0.8,
-        max_tokens=150,
     )
-    return response.choices[0].message.content.strip()
+    return text
 
 
 def _call_leonardo(image_prompt: str) -> Optional[bytes]:
