@@ -23,62 +23,70 @@ Credentials → только в `.env`. `.env` → в `.gitignore`. Провер
 
 ### ❌ Никогда не останавливать все контейнеры разом
 ```bash
-# НЕЛЬЗЯ — убьёт ВСЕ сервисы на VPS (timemirror и др.)
+# НЕЛЬЗЯ — на сервере могут жить и другие сервисы (Caddy, будущие проекты)
 docker stop $(docker ps -q)
 
 # ПРАВИЛЬНО — только наш бот
-docker stop tg_news_bot newsbot 2>/dev/null
+docker stop tg_news_bot
 ```
 
-### ❌ Не делать docker build для изменений .py файлов
-```bash
-# МЕДЛЕННО (2-3 мин) — только если менялся Dockerfile или requirements.txt
-docker build ...
+### ❌ Не публиковать порт бота наружу
+Docker вставляет свои правила iptables **в обход ufw**: `-p 8010:8010` открывает админку
+в интернет, даже если в ufw порт закрыт. Только `-p 127.0.0.1:8010:8010`; наружу админку
+отдаёт Caddy по HTTPS (`deploy/Caddyfile`). Так и делает `deploy.py`.
 
-# БЫСТРО (15 сек) — для любых .py изменений
-docker cp agents/writer.py tg_news_bot:/app/agents/writer.py
-docker restart tg_news_bot
-```
+### ❌ Секреты не должны попадать в образ
+Dockerfile делает `COPY . .`, поэтому `.dockerignore` (лежит в git) исключает `.env`,
+`key_param.txt`, `data/`. Секреты — только через `--env-file`. CI проверяет, что образ чистый.
 
-### ⚠️ docker restart не подхватывает изменения .env
-После изменения `.env` на VPS нужен полный цикл:
-```bash
-docker stop tg_news_bot && docker rm tg_news_bot
-docker run -d --name tg_news_bot --restart unless-stopped \
-  -v /opt/tg_news_bot/data:/app/data \
-  --env-file /opt/tg_news_bot/.env \
-  -p 8010:8010 tg_news_bot
-```
+### ⚠️ docker restart не перечитывает .env
+После изменения `.env` на сервере — `python deploy.py --rebuild` (пересоздаёт контейнер).
 
 ---
 
 ## Деплой
 
-### Стандартный деплой (изменения .py)
 ```bash
-python deploy.py           # docker cp + restart, ~15 сек
-python deploy.py --rebuild # пересборка образа, ~3 мин
+python deploy.py            # код HEAD → в работающий контейнер → restart, ~20 сек
+python deploy.py --rebuild  # docker build + новый контейнер (Dockerfile, requirements, .env)
+python deploy.py --allow-dirty  # выложить и незакоммиченные правки — только для отладки
 ```
 
-### После добавления нового агента
-Сразу добавь файл в `UPLOAD_PATHS` в `deploy.py`. Иначе файл не попадёт на VPS.
+- Выкладывается `git archive HEAD` целиком — список файлов вести не нужно
+  (раньше забытый в списке файл тихо не доезжал до прода).
+- Деплой ждёт `/health` и падает с exit 1, если бот не поднялся.
+- На сервере в `/opt/tg_news_bot/REVISION` — какой коммит сейчас в проде.
+- GitHub Actions **не деплоит** — только проверяет код (ruff, импорт модулей, init_db,
+  docker build). Секреты бота в GitHub не храним.
 
-### После изменения .env на VPS
-Нужен `docker stop/rm/run` — не просто `restart`. Иначе переменные не обновятся.
+---
+
+## LLM: кто за что отвечает
+
+| Задача | Модель | Почему |
+|---|---|---|
+| Fact-check + поиск фактов | Perplexity sonar | нужен веб-поиск; заодно отдаёт `key_facts` |
+| Writer, Formatter, arXiv, дедуп | DeepSeek (`core/llm.py`) | дешевле в разы, веб не нужен |
+
+### ❌ DeepSeek не должен «знать» факты сам
+У DeepSeek нет веб-поиска, его знания устаревают. Writer пишет **только** по контенту
+статьи + `verification.key_facts`. Новый промпт с фактами — с тем же запретом.
+
+### ⚠️ thinking-режим DeepSeek съедает max_tokens
+Вызывать DeepSeek только через `core.llm.deepseek_chat` — там thinking выключен, пустой
+ответ = ошибка с ретраем. Лимиты с запасом (русский ~2–3 симв/токен + HTML-теги):
+brief 500, analysis 1800, digest/formatter 3000.
 
 ---
 
 ## Telegram Bot API
 
-### ❌ Не превышать max_tokens при генерации HTML-постов
-Perplexity может обрезать ответ прямо внутри HTML-тега → Telegram вернёт:
+### ⚠️ Обрезанный ответ модели ломает HTML
+Ответ, обрезанный по max_tokens посреди тега, Telegram отвергает:
 ```
 Can't parse entities: unclosed start tag at byte offset XXXX
 ```
-Лимиты с запасом:
-- brief: max_tokens=300 (цель ~250 симв)
-- analysis: max_tokens=1400 (цель ~1500 симв)
-- formatter: max_tokens=1500 (форматирует уже готовый текст)
+Поэтому лимиты выше — с запасом, а formatter балансирует теги.
 
 ### ⚠️ При жёсткой обрезке текста проверять границу HTML-тега
 ```python
@@ -120,24 +128,41 @@ WHERE ra.status = 'new' GROUP BY s.name ORDER BY COUNT(*) DESC;
 
 ---
 
-## Другие сервисы на VPS
-
-На том же сервере работают несколько проектов:
-
-| Контейнер | Порт | Управление |
-|---|---|---|
-| `timemirror-app-1` | 8000 (internal) | `cd /opt/timemirror && docker compose up -d` |
-| `timemirror-db-1` | — | то же |
-| `tg_news_bot` | 8010 | `deploy.py` |
-
-**Не трогать чужие контейнеры.** Если случайно остановил — `cd /opt/timemirror && docker compose up -d`.
+### ❌ «Свежесть» по fetched_at обманывает на пустой БД
+Пул кандидатов берётся по `fetched_at` (когда скачали), а у только что скачанной статьи
+он = сейчас, даже если в RSS она от 2024 года. На новой БД (переезд 2026-11) в кандидаты
+попали посты двухмесячной давности. Поэтому researcher дополнительно отсекает статьи
+с RSS-датой старше `RSS_MAX_AGE_DAYS` (7). То же спасает при добавлении нового источника.
 
 ---
 
-## Чеклист перед деплоем
+## Сервер
 
-- [ ] `git diff` — нет credentials в изменённых файлах
-- [ ] Новые агенты добавлены в `UPLOAD_PATHS` в `deploy.py`
-- [ ] Если менялся `.env` — используешь `docker stop/rm/run`, не просто `restart`
-- [ ] Если менялся `Dockerfile`/`requirements.txt` — используешь `deploy.py --rebuild`
-- [ ] Иначе — `deploy.py` (быстрый docker cp)
+Старый VPS (2026) **взломан** и выведен из работы: на нём лежал `.env`, токен бота угнали
+(злоумышленник поставил свой вебхук). Все ключи перевыпущены. Сервер настраивается
+скриптом `deploy/server_setup.sh` — с нуля за ~5 минут, ничего «руками по памяти».
+
+- SSH — **только по ключу**, вход по паролю и `PermitRootLogin yes` отключены.
+- ufw: снаружи 22, 80, 443. fail2ban, автообновления безопасности, swap 2 ГБ,
+  ротация логов docker (5×20 МБ).
+- Админка — HTTPS через Caddy (Let's Encrypt), бот слушает только `127.0.0.1:8010`.
+- Бэкап БД ежедневно 03:30 UTC: локально 14 дней + **копия в Telegram** админу
+  (если задан `TELEGRAM_ADMIN_CHAT_ID`) — локальная копия не переживёт потерю сервера.
+
+IP прода, адрес админки, пароли — **не в репозитории** (он публичный). Они в локальном
+`.env` / `key_param.txt` (оба в `.gitignore`).
+
+### После любой смены токена бота / подозрения на утечку
+```bash
+curl -s https://api.telegram.org/bot$TOKEN/getWebhookInfo   # url должен быть пустым
+```
+Бот вебхуки не использует. Непустой `url` = токен у чужих → BotFather → Revoke.
+
+---
+
+## Чеклист перед коммитом и деплоем
+
+- [ ] `git diff --staged` — нет секретов, IP прода, адреса админки
+- [ ] `ruff check --select F,E9 .` — чисто (то же проверяет CI)
+- [ ] Закоммичено → `python deploy.py` (или `--rebuild`, если менялись Dockerfile / requirements / .env)
+- [ ] Деплой не во время слотов публикации (07:00, 12:00, 16:00, 19:00 МСК)
