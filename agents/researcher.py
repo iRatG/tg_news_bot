@@ -24,7 +24,7 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import feedparser
@@ -76,6 +76,7 @@ FALLBACK_MIN_SCORE = 6   # Fallback порог: когда пул старый, 
 MAX_RESULTS        = 5   # Максимум кандидатов на выходе
 FETCH_WORKERS      = 5   # Потоков для параллельного парсинга
 INSERT_BATCH       = 100 # Размер батча INSERT (обход лимита SQLite в 999 переменных)
+RSS_MAX_AGE_DAYS   = 7   # Статьи с RSS-датой старше — не кандидаты (архив ленты)
 BRAND_CAP          = 2   # Макс. Tier 2/3 статей одного бренда в финальной выборке
 SOURCE_CAP         = 1   # Макс. статей из одного RSS-источника в дайджесте
 
@@ -486,6 +487,26 @@ async def fetch_and_rank() -> List[RawArticleCandidate]:
     pub_index: Dict[str, Optional[datetime]] = {
         a["url"]: a["published_at"] for a in all_raw
     }
+
+    # Отсев архива по RSS-дате. Пул выше фильтруется по fetched_at, а у только
+    # что скачанной статьи fetched_at = сейчас — даже если в RSS она от 2024 года.
+    # Так бывает на пустой БД (переезд на новый сервер 2026-11-15: в кандидаты
+    # попали посты двухмесячной давности) и при добавлении нового источника.
+    # Нет RSS-даты → не отсеиваем (как раньше).
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(days=RSS_MAX_AGE_DAYS)
+
+    def _is_stale(url: str) -> bool:
+        pub = pub_index.get(url)
+        if pub is None:
+            return False
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=timezone.utc)
+        return pub < stale_cutoff
+
+    stale = sum(1 for r in pool_rows if _is_stale(r[2]))
+    if stale:
+        logger.info(f"[researcher] Отсеяно по RSS-дате (> {RSS_MAX_AGE_DAYS} дн.): {stale}")
+    pool_rows = [r for r in pool_rows if not _is_stale(r[2])]
 
     # 6. Скоринг: базовый score × tier_mult × diversity_mult
     brand_history = await _get_brand_history()

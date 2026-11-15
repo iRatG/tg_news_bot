@@ -36,7 +36,7 @@ RSS_SEEDS = [
     {"name": "HuggingFace Blog",     "url": "https://huggingface.co/blog/feed.xml",          "category": "ai_models"},
     {"name": "Simon Willison",       "url": "https://simonwillison.net/atom/entries/",        "category": "vibe_coding"},
     {"name": "Latent Space",         "url": "https://www.latent.space/feed",                  "category": "vibe_coding"},
-    {"name": "TLDR AI",              "url": "https://tldr.tech/ai/rss",                      "category": "ai_news"},
+    {"name": "TLDR AI",              "url": "https://tldr.tech/api/rss/ai",                      "category": "ai_news"},
     {"name": "Towards Data Science", "url": "https://towardsdatascience.com/feed",            "category": "data_eng"},
 ]
 
